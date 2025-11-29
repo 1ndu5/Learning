@@ -978,13 +978,23 @@ function saveHighScores(scores) {
   saveToStorage("tt_highscores", scores);
 }
 
-function isHighScore(money) {
+async function isHighScore(money, level) {
   // Only arcade mode scores count
   if (gameMode !== 'arcade') return false;
   
-  const scores = getHighScores();
-  if (scores.length < 10) return true;
-  return money > scores[scores.length - 1].money;
+  // Must have completed at least level 1 (reached level 2)
+  if (level < 2) return false;
+  
+  // Check local scores (top 10)
+  const localScores = getHighScores();
+  const isLocalHighScore = localScores.length < 10 || money > localScores[localScores.length - 1].money;
+  
+  // Check global scores (top 100)
+  const globalScores = await getGlobalScores();
+  const isGlobalHighScore = globalScores.length < 100 || money > globalScores[globalScores.length - 1].money;
+  
+  // Qualify if either local OR global high score
+  return isLocalHighScore || isGlobalHighScore;
 }
 
 function openHighScores() {
@@ -1270,9 +1280,18 @@ function endGame() {
     popup.style.display = 'none';
     
     // Check for high score
-    if (moneyTotal > 0 && isHighScore(moneyTotal)) {
-      showNameEntry();
-    } else {
+    if (moneyTotal > 0) {
+      isHighScore(moneyTotal, currentLevel).then(qualifies => {
+        if (qualifies) {
+          showNameEntry();
+        } else {
+          // Show "Choose Mode" overlay with two buttons
+          document.getElementById('overlay-title').textContent = 'Try Again?';
+          document.getElementById('overlay-buttons').style.display = 'flex';
+          document.getElementById('game-overlay').style.display = 'flex';
+        }
+      });
+    
       // Show "Choose Mode" overlay with two buttons
       document.getElementById('overlay-title').textContent = 'Try Again?';
       document.getElementById('overlay-buttons').style.display = 'flex';
