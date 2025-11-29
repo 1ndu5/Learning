@@ -1505,7 +1505,7 @@ function init() {
     e.preventDefault();
   }, { passive: false });
 
-  // Add Ctrl + ` listener for admin menu (only when settings menu is open)
+  // Add Alt + ` listener for admin menu (only when settings menu is open)
   document.addEventListener('keydown', function(e) {
     // Check if settings window is open
     const settingsOpen = document.getElementById('settings-window').style.display === 'block';
@@ -1513,8 +1513,8 @@ function init() {
     // Only activate when settings menu is open and admin menu is not already open
     if (!settingsOpen || adminMenuOpen) return;
     
-    // Check for Ctrl + ` (backtick)
-    if (e.ctrlKey && e.key === '`') {
+    // Check for Alt + ` (backtick)
+    if (e.altKey && e.key === '`') {
       e.preventDefault();
       openAdminMenu();
     }
