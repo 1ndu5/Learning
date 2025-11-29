@@ -682,7 +682,7 @@ function createCustomer() {
   img.textContent = face;
   const name = names[Math.floor(Math.random() * names.length)];
   card.dataset.customerName = name;
-  questionBox.textContent = `${name} wants ${quantity} × $${item.price} ${item.name}s. What is the total cost?`;
+  questionBox.textContent = `${name} wants ${quantity} × $${item.price} ${item.name}s. What is the cost?`;
   resultBox.textContent = '';
 
   // submit handler
@@ -1083,37 +1083,9 @@ function getDifficultyCode() {
   return code;
 }
 
-function saveHighScore() {
+async function saveHighScore() {
   let name = document.getElementById('player-name').value.trim();
-  if (name === '') name = 'Anonymous';
-  name = name.substring(0, 7);
-  
-  const scores = getHighScores();
-  scores.push({
-    name: name,
-    money: moneyTotal,
-    level: currentLevel
-  });
-  
-  // Sort by money descending
-  scores.sort((a, b) => b.money - a.money);
-  
-  // Keep only top 10
-  if (scores.length > 10) {
-    scores.length = 10;
-  }
-  
-  saveHighScores(scores);
-  closeNameEntry();
-  
-  // Show high scores screen
-  justSavedHighScore = true;
-  openHighScores();
-}
-
-function saveHighScore() {
-  let name = document.getElementById('player-name').value.trim();
-  if (name === '') name = 'Anonymous';
+  if (name === '') name = 'Anon';
   name = name.substring(0, 7);
   
   const scores = getHighScores();
@@ -1133,8 +1105,11 @@ function saveHighScore() {
   
   saveHighScores(scores);
   
-  // Also save to global leaderboard
-  saveGlobalScore(name, moneyTotal, currentLevel);
+  // Save to global leaderboard and wait for it to complete
+  await saveGlobalScore(name, moneyTotal, currentLevel);
+  
+  // Small delay to ensure database has updated
+  await new Promise(resolve => setTimeout(resolve, 500));
   
   closeNameEntry();
   
