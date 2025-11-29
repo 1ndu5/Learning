@@ -762,7 +762,7 @@ function handleSubmitForCard(card, answerInput, questionBox, resultBox) {
         if (selectedType === 'discount') {
           // discount follow-up
           const discount = [10,20,25,50][Math.floor(Math.random()*4)];
-          const newPrice = Math.round(mainTotal * (1 - discount/100) * 10) / 10;
+          const newPrice = Math.round(mainTotal * (1 - discount/100) * 100) / 100;
           card.dataset.followUpActive = "true";
           card.dataset.followUpAnswer = String(newPrice);
           questionBox.textContent = `Discount time! ${discount}% off. New price?`;
