@@ -422,9 +422,12 @@
   <div id="admin-window" role="dialog" aria-modal="true" aria-label="Admin Settings" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); background: #fff; padding: 18px; border-radius: 12px; width: 600px; max-width: 95%; max-height: 80vh; overflow-y: auto; z-index: 1200; box-shadow: 0 8px 30px rgba(0,0,0,0.3);">
     <h2>🔧 Admin: Arcade Level Settings</h2>
     <div id="admin-levels-container"></div>
-    <div style="margin-top:14px; display:flex; gap:8px; justify-content:flex-end;">
-      <button onclick="saveAdminSettings()">Save All</button>
-      <button onclick="closeAdminMenu()">Close</button>
+    <div style="margin-top:14px; display:flex; gap:8px; justify-content:space-between;">
+      <button onclick="resetToDefault()" style="background: #ff6b6b; color: #fff; padding: 8px 16px; cursor: pointer; border-radius: 8px; border: none; font-weight: 600;">Reset to Default</button>
+      <div style="display:flex; gap:8px;">
+        <button onclick="saveAdminSettings()">Save All</button>
+        <button onclick="closeAdminMenu()">Close</button>
+      </div>
     </div>
   </div>
 
@@ -503,6 +506,20 @@ let arcadeLevels = [
   { threshold: 10000, spawnTime: 6, speedUpEvery: 5, discount: true, change: true, buyMore: true, maxWrong: 3 }
 ];
 
+// Store default levels for reset functionality
+const defaultArcadeLevels = [
+  { threshold: 300, spawnTime: 8, speedUpEvery: 0, discount: false, change: false, buyMore: false, maxWrong: 3 },
+  { threshold: 600, spawnTime: 5, speedUpEvery: 0, discount: false, change: false, buyMore: false, maxWrong: 3 },
+  { threshold: 1000, spawnTime: 3, speedUpEvery: 0, discount: false, change: false, buyMore: false, maxWrong: 3 },
+  { threshold: 1500, spawnTime: 6, speedUpEvery: 0, discount: false, change: true, buyMore: false, maxWrong: 3 },
+  { threshold: 2000, spawnTime: 4, speedUpEvery: 0, discount: false, change: true, buyMore: false, maxWrong: 3 },
+  { threshold: 2500, spawnTime: 4, speedUpEvery: 5, discount: false, change: true, buyMore: false, maxWrong: 3 },
+  { threshold: 3000, spawnTime: 7, speedUpEvery: 5, discount: false, change: false, buyMore: true, maxWrong: 3 },
+  { threshold: 4000, spawnTime: 6, speedUpEvery: 5, discount: false, change: false, buyMore: true, maxWrong: 3 },
+  { threshold: 5000, spawnTime: 9, speedUpEvery: 10, discount: true, change: false, buyMore: false, maxWrong: 3 },
+  { threshold: 10000, spawnTime: 6, speedUpEvery: 5, discount: true, change: true, buyMore: true, maxWrong: 3 }
+];
+  
 /* ---------------------------
    Persistence helpers
    --------------------------- */
@@ -1442,6 +1459,16 @@ function saveAdminSettings() {
   closeAdminMenu();
 }
 
+function resetToDefault() {
+  if (confirm('Are you sure you want to reset all arcade levels to default settings? This cannot be undone.')) {
+    // Deep copy default levels
+    arcadeLevels = JSON.parse(JSON.stringify(defaultArcadeLevels));
+    saveArcadeLevels();
+    renderAdminMenu();
+    alert('All levels have been reset to default settings.');
+  }
+}
+  
 function init() {
   loadTableOptions();
   applySavedSettingsToUI();
