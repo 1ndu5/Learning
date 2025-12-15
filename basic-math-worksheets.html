@@ -9,7 +9,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- InstantDB SDK -->
-    <script src="https://cdn.instantdb.com/v2"></script>
+    <script src="https://www.unpkg.com/@instantdb/core@latest/dist/standalone/index.umd.cjs"></script>
     <style>
         @media print {
             body * {
@@ -104,38 +104,29 @@
           const [statsDisplayCount, setStatsDisplayCount] = useState(20);
 
           useEffect(() => {
-            debugLog('A', 'basic-math-worksheets.html:load', 'initial window.instantdb presence', {
-              hasInstantDB: !!window.instantdb,
-              appIdConfigured: INSTANTDB_APP_ID !== '2275819f-2db8-499c-990a-e37b075e0cef' ? 'custom' : 'set',
-              appId: INSTANTDB_APP_ID
-            });
-            const savedUsers = localStorage.getItem('mathPracticeUsers');
-            const savedData = localStorage.getItem('mathPracticeAllData');
-            const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
-            const savedMeta = localStorage.getItem('mathPracticeMeta');
-
-            if (savedUsers) {
-              const parsedUsers = JSON.parse(savedUsers);
-              setUsers(parsedUsers);
-              if (parsedUsers.length > 0 && !parsedUsers.includes(currentUser)) {
-                setCurrentUser(parsedUsers[0]);
-              }
-            }
-
-            if (savedData) {
-              setAllUserData(JSON.parse(savedData));
-            }
-
-            if (savedSheets) {
-              setSavedWorksheets(JSON.parse(savedSheets));
-            }
-
-            if (savedMeta) {
-              try {
-                setMetaUpdatedAt(JSON.parse(savedMeta));
-              } catch (e) {
-                console.warn('Could not parse meta info', e);
-              }
+            if (!window.InstantCore || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
+            try {
+              debugLog('A', 'basic-math-worksheets.html:init', 'attempting init', {
+                hasInstantCore: !!window.InstantCore,
+                appId: INSTANTDB_APP_ID
+              });
+              const { init } = window.InstantCore;
+              const client = init({ appId: INSTANTDB_APP_ID });
+              setInstantClient(client);
+              
+              const unsub = client.auth.onAuthStateChange((user) => {
+                setCloudUser(user || null);
+                setAuthEmailDisplay(user?.email || '');
+              });
+              
+              debugLog('A', 'basic-math-worksheets.html:init', 'init success', {
+                hasClient: !!client,
+                hasAuth: !!client?.auth
+              });
+              return () => unsub && unsub();
+            } catch (err) {
+              debugLog('A', 'basic-math-worksheets.html:init', 'init error', { error: String(err) });
+              console.warn('InstantDB init failed', err);
             }
           }, []);
 
@@ -276,9 +267,9 @@
                 updatedAt: new Date().toISOString(),
                 id: cloudUser.id
               };
-              await instantClient.transact(
+              await instantClient.transact([
                 instantClient.tx[SNAPSHOT_COLLECTION][cloudUser.id].update(payload)
-              );
+              ]);
             } catch (err) {
               console.warn('Cloud push skipped', err);
             }

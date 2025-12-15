@@ -1,0 +1,2 @@
+{"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"basic-math-worksheets.html:load","message":"initial window.instantdb presence","data":{"hasInstantDB":false,"appIdConfigured":"set","appId":"2275819f-2db8-499c-990a-e37b075e0cef"},"timestamp":1765789047121}
+{"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"basic-math-worksheets.html:handleAuthButton","message":"click","data":{"hasInstantClient":false,"hasCloudUser":false,"loginInFlight":false},"timestamp":1765789063640}
