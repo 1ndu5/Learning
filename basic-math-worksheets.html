@@ -8,6 +8,8 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- InstantDB SDK -->
+    <script src="https://cdn.instantdb.com/v2"></script>
     <style>
         @media print {
             body * {
@@ -35,6 +37,10 @@
 
     <script type="text/babel">
         const { useState, useEffect } = React;
+
+        // ==== Cloud config ====
+        const INSTANTDB_APP_ID = '2275819f-2db8-499c-990a-e37b075e0cef';
+        const SNAPSHOT_COLLECTION = 'snapshots';
 
         const MathPracticeApp = () => {
           const [view, setView] = useState('setup');
@@ -69,6 +75,13 @@
           const [allUserData, setAllUserData] = useState({});
           const [savedWorksheets, setSavedWorksheets] = useState({});
 
+          // Cloud / auth state
+          const [instantClient, setInstantClient] = useState(null);
+          const [cloudUser, setCloudUser] = useState(null);
+          const [loginInFlight, setLoginInFlight] = useState(false);
+          const [authEmailDisplay, setAuthEmailDisplay] = useState('');
+          const [metaUpdatedAt, setMetaUpdatedAt] = useState({ users: null, allUserData: null, savedWorksheets: null });
+
           const [worksheetDisplayCount, setWorksheetDisplayCount] = useState(5);
           const [statsDisplayCount, setStatsDisplayCount] = useState(20);
 
@@ -76,6 +89,7 @@
             const savedUsers = localStorage.getItem('mathPracticeUsers');
             const savedData = localStorage.getItem('mathPracticeAllData');
             const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
+            const savedMeta = localStorage.getItem('mathPracticeMeta');
 
             if (savedUsers) {
               const parsedUsers = JSON.parse(savedUsers);
@@ -92,6 +106,14 @@
             if (savedSheets) {
               setSavedWorksheets(JSON.parse(savedSheets));
             }
+
+            if (savedMeta) {
+              try {
+                setMetaUpdatedAt(JSON.parse(savedMeta));
+              } catch (e) {
+                console.warn('Could not parse meta info', e);
+              }
+            }
           }, []);
 
           useEffect(() => {
@@ -101,27 +123,194 @@
             }
           }, [currentUser]);
 
+          useEffect(() => {
+            if (!window.instantdb || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
+            try {
+              const client = window.instantdb.init({ appId: INSTANTDB_APP_ID });
+              setInstantClient(client);
+              const unsub = client.auth.onAuthStateChange((user) => {
+                setCloudUser(user || null);
+                setAuthEmailDisplay(user?.email || '');
+              });
+              return () => unsub && unsub();
+            } catch (err) {
+              console.warn('InstantDB init failed', err);
+            }
+          }, []);
+
+          useEffect(() => {
+            if (!cloudUser || !instantClient) return;
+            (async () => {
+              const cloudSnap = await fetchCloudSnapshot();
+              const localSnap = buildSnapshot();
+              const merged = mergeSnapshots(localSnap, cloudSnap);
+              applyMergedSnapshot(merged);
+              await pushCloudSnapshot();
+            })();
+          }, [cloudUser, instantClient]);
+
+          const touchMeta = (key) => {
+            const now = new Date().toISOString();
+            setMetaUpdatedAt(prev => {
+              const next = { ...prev, [key]: now };
+              localStorage.setItem('mathPracticeMeta', JSON.stringify(next));
+              return next;
+            });
+            return now;
+          };
+
+          const buildSnapshot = () => ({
+            users,
+            allUserData,
+            savedWorksheets,
+            meta: metaUpdatedAt
+          });
+
+          const mergeSnapshots = (localSnap, cloudSnap) => {
+            if (!cloudSnap) return { ...localSnap };
+
+            const mergedMeta = { ...(localSnap.meta || {}), ...(cloudSnap.meta || {}) };
+
+            const pickByMeta = (key, fallback) => {
+              const lTime = new Date(localSnap.meta?.[key] || 0).getTime();
+              const cTime = new Date(cloudSnap.meta?.[key] || 0).getTime();
+              if (cTime > lTime) return cloudSnap[key] ?? fallback;
+              return localSnap[key] ?? fallback;
+            };
+
+            const mergedUsers = pickByMeta('users', []);
+            const mergedAllUserData = {};
+            const allUserKeys = new Set([
+              ...Object.keys(localSnap.allUserData || {}),
+              ...Object.keys(cloudSnap.allUserData || {})
+            ]);
+
+            allUserKeys.forEach(u => {
+              const localEntry = (localSnap.allUserData || {})[u];
+              const cloudEntry = (cloudSnap.allUserData || {})[u];
+              const lTime = new Date(localEntry?.updatedAt || localSnap.meta?.allUserData || 0).getTime();
+              const cTime = new Date(cloudEntry?.updatedAt || cloudSnap.meta?.allUserData || 0).getTime();
+              mergedAllUserData[u] = cTime > lTime ? cloudEntry || localEntry : localEntry || cloudEntry;
+            });
+
+            const mergedSavedWorksheets = {};
+            const allWorksheetUsers = new Set([
+              ...Object.keys(localSnap.savedWorksheets || {}),
+              ...Object.keys(cloudSnap.savedWorksheets || {})
+            ]);
+
+            allWorksheetUsers.forEach(u => {
+              const localWs = (localSnap.savedWorksheets || {})[u] || {};
+              const cloudWs = (cloudSnap.savedWorksheets || {})[u] || {};
+              const mergedUserWs = {};
+              const wsKeys = new Set([...Object.keys(localWs), ...Object.keys(cloudWs)]);
+              wsKeys.forEach(id => {
+                const lWs = localWs[id];
+                const cWs = cloudWs[id];
+                const lTime = new Date(lWs?.updatedAt || lWs?.createdAt || 0).getTime();
+                const cTime = new Date(cWs?.updatedAt || cWs?.createdAt || 0).getTime();
+                mergedUserWs[id] = cTime > lTime ? cWs || lWs : lWs || cWs;
+              });
+              mergedSavedWorksheets[u] = mergedUserWs;
+            });
+
+            return {
+              users: mergedUsers,
+              allUserData: mergedAllUserData,
+              savedWorksheets: mergedSavedWorksheets,
+              meta: mergedMeta
+            };
+          };
+
+          const applyMergedSnapshot = (snapshot) => {
+            if (!snapshot) return;
+            setUsers(snapshot.users || []);
+            setAllUserData(snapshot.allUserData || {});
+            setSavedWorksheets(snapshot.savedWorksheets || {});
+            setMetaUpdatedAt(snapshot.meta || {});
+
+            localStorage.setItem('mathPracticeUsers', JSON.stringify(snapshot.users || []));
+            localStorage.setItem('mathPracticeAllData', JSON.stringify(snapshot.allUserData || {}));
+            localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify(snapshot.savedWorksheets || {}));
+            localStorage.setItem('mathPracticeMeta', JSON.stringify(snapshot.meta || {}));
+          };
+
+          const pushCloudSnapshot = async () => {
+            if (!instantClient || !cloudUser || !navigator.onLine) return;
+            try {
+              const snapshot = buildSnapshot();
+              const payload = {
+                data: snapshot,
+                updatedAt: new Date().toISOString(),
+                id: cloudUser.id
+              };
+              await instantClient.transact(
+                instantClient.tx[SNAPSHOT_COLLECTION][cloudUser.id].update(payload)
+              );
+            } catch (err) {
+              console.warn('Cloud push skipped', err);
+            }
+          };
+
+          const fetchCloudSnapshot = async () => {
+            if (!instantClient || !cloudUser || !navigator.onLine) return null;
+            try {
+              const res = await instantClient.query({
+                [SNAPSHOT_COLLECTION]: {
+                  $: {
+                    where: { id: cloudUser.id },
+                    limit: 1
+                  }
+                }
+              });
+              const record = res?.[SNAPSHOT_COLLECTION]?.[0];
+              return record?.data || null;
+            } catch (err) {
+              console.warn('Cloud fetch skipped', err);
+              return null;
+            }
+          };
+
+          async function maybePushCloudSnapshot() {
+            await pushCloudSnapshot();
+          }
+
           const getCurrentUserData = () => {
             return allUserData[currentUser] || { questionHistory: {} };
           };
 
           const saveUserData = (userData) => {
+            const stamped = { ...userData, updatedAt: new Date().toISOString() };
             const newAllData = {
               ...allUserData,
-              [currentUser]: userData
+              [currentUser]: stamped
             };
             setAllUserData(newAllData);
             localStorage.setItem('mathPracticeAllData', JSON.stringify(newAllData));
+            touchMeta('allUserData');
+            maybePushCloudSnapshot();
           };
 
           const saveUsers = (userList) => {
             setUsers(userList);
             localStorage.setItem('mathPracticeUsers', JSON.stringify(userList));
+            touchMeta('users');
+            maybePushCloudSnapshot();
           };
 
           const saveWorksheets = (worksheets) => {
+            const now = new Date().toISOString();
+            Object.values(worksheets).forEach(userWs => {
+              Object.values(userWs || {}).forEach(ws => {
+                if (!ws.updatedAt) {
+                  ws.updatedAt = ws.createdAt || now;
+                }
+              });
+            });
             setSavedWorksheets(worksheets);
             localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify(worksheets));
+            touchMeta('savedWorksheets');
+            maybePushCloudSnapshot();
           };
 
           const addUser = () => {
@@ -420,6 +609,35 @@
             }
 
             return questions;
+          };
+
+          const handleAuthButton = async () => {
+            if (!instantClient) {
+              alert('Cloud not configured. Set INSTANTDB_APP_ID and reload.');
+              return;
+            }
+
+            if (cloudUser) {
+              try {
+                await instantClient.auth.signOut();
+              } catch (err) {
+                console.warn('Sign out failed', err);
+              }
+              return;
+            }
+
+            const email = prompt('Enter your email to receive a magic link:');
+            if (!email) return;
+            setLoginInFlight(true);
+            try {
+              await instantClient.auth.sendMagicLinkEmail(email, { redirectTo: window.location.href });
+              alert('Magic link sent. Please check your email.');
+            } catch (err) {
+              alert('Could not send magic link. Please try again.');
+              console.warn(err);
+            } finally {
+              setLoginInFlight(false);
+            }
           };
 
           const handleGenerateWorksheet = () => {
@@ -831,7 +1049,12 @@
             return (
               <div className="max-w-6xl mx-auto p-6">
               <div className="bg-white rounded-lg shadow-lg p-8">
-                <h1 className="text-3xl font-bold mb-6 text-gray-800">Basic Math Facts Worksheet Generator</h1>
+                <div className="mb-6">
+                  <h1 className="text-3xl font-bold text-gray-800">Basic Math Facts Worksheet Generator</h1>
+                  {cloudUser && (
+                    <div className="text-sm text-gray-600 mt-1">Logged in as: {authEmailDisplay}</div>
+                  )}
+                </div>
 
                 <div className="mb-6 p-4 bg-blue-50 border border-blue-300 rounded">
                   <div className="flex items-center space-x-4">
@@ -932,6 +1155,14 @@
                     className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700"
                   >
                     📊 View Progress
+                  </button>
+
+                  <button
+                    onClick={handleAuthButton}
+                    disabled={loginInFlight || (INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID')}
+                    className={`px-6 py-3 rounded-lg font-semibold text-white ${cloudUser ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'} ${loginInFlight ? 'opacity-70 cursor-not-allowed' : ''}`}
+                  >
+                    {cloudUser ? 'Log Out' : 'Login to Save Data'}
                   </button>
 
                   <button
