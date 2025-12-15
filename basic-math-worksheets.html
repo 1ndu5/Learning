@@ -658,6 +658,7 @@
               hasCloudUser: !!cloudUser,
               loginInFlight
             });
+            
             if (!instantClient) {
               alert('Cloud not configured. Set INSTANTDB_APP_ID and reload.');
               return;
@@ -672,14 +673,26 @@
               return;
             }
 
-            const email = prompt('Enter your email to receive a magic link:');
+            const email = prompt('Enter your email to receive a login code:');
             if (!email) return;
+            
             setLoginInFlight(true);
             try {
-              await instantClient.auth.sendMagicLinkEmail(email, { redirectTo: window.location.href });
-              alert('Magic link sent. Please check your email.');
+              // Send the magic code
+              await instantClient.auth.sendMagicCode({ email });
+              
+              // Prompt user for the code they received
+              const code = prompt('Check your email and enter the code you received:');
+              if (!code) {
+                setLoginInFlight(false);
+                return;
+              }
+              
+              // Sign in with the code
+              await instantClient.auth.signInWithMagicCode({ email, code });
+              alert('Successfully signed in!');
             } catch (err) {
-              alert('Could not send magic link. Please try again.');
+              alert('Could not sign in. Please check the code and try again.');
               console.warn(err);
             } finally {
               setLoginInFlight(false);
