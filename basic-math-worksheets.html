@@ -42,6 +42,24 @@
         const INSTANTDB_APP_ID = '2275819f-2db8-499c-990a-e37b075e0cef';
         const SNAPSHOT_COLLECTION = 'snapshots';
 
+        // #region agent log helper
+        const debugLog = (hypothesisId, location, message, data = {}, runId = 'run1') => {
+          fetch('http://127.0.0.1:7242/ingest/cd4d49cf-b3ae-442d-8695-426e0f27e7ab', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: 'debug-session',
+              runId,
+              hypothesisId,
+              location,
+              message,
+              data,
+              timestamp: Date.now()
+            })
+          }).catch(() => {});
+        };
+        // #endregion
+
         const MathPracticeApp = () => {
           const [view, setView] = useState('setup');
           const [currentWorksheet, setCurrentWorksheet] = useState(null);
@@ -86,6 +104,11 @@
           const [statsDisplayCount, setStatsDisplayCount] = useState(20);
 
           useEffect(() => {
+            debugLog('A', 'basic-math-worksheets.html:load', 'initial window.instantdb presence', {
+              hasInstantDB: !!window.instantdb,
+              appIdConfigured: INSTANTDB_APP_ID !== '2275819f-2db8-499c-990a-e37b075e0cef' ? 'custom' : 'set',
+              appId: INSTANTDB_APP_ID
+            });
             const savedUsers = localStorage.getItem('mathPracticeUsers');
             const savedData = localStorage.getItem('mathPracticeAllData');
             const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
@@ -126,14 +149,23 @@
           useEffect(() => {
             if (!window.instantdb || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
             try {
+              debugLog('A', 'basic-math-worksheets.html:init', 'attempting init', {
+                hasInstantDB: !!window.instantdb,
+                appId: INSTANTDB_APP_ID
+              });
               const client = window.instantdb.init({ appId: INSTANTDB_APP_ID });
               setInstantClient(client);
               const unsub = client.auth.onAuthStateChange((user) => {
                 setCloudUser(user || null);
                 setAuthEmailDisplay(user?.email || '');
               });
+              debugLog('A', 'basic-math-worksheets.html:init', 'init success', {
+                hasClient: !!client,
+                hasAuth: !!client?.auth
+              });
               return () => unsub && unsub();
             } catch (err) {
+              debugLog('A', 'basic-math-worksheets.html:init', 'init error', { error: String(err) });
               console.warn('InstantDB init failed', err);
             }
           }, []);
@@ -612,6 +644,11 @@
           };
 
           const handleAuthButton = async () => {
+            debugLog('B', 'basic-math-worksheets.html:handleAuthButton', 'click', {
+              hasInstantClient: !!instantClient,
+              hasCloudUser: !!cloudUser,
+              loginInFlight
+            });
             if (!instantClient) {
               alert('Cloud not configured. Set INSTANTDB_APP_ID and reload.');
               return;
