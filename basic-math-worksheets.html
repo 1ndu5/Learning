@@ -102,15 +102,63 @@
 
           const [worksheetDisplayCount, setWorksheetDisplayCount] = useState(5);
           const [statsDisplayCount, setStatsDisplayCount] = useState(20);
-
+          
+          // First useEffect - Load saved data from localStorage
           useEffect(() => {
-            if (!window.InstantCore || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
+            debugLog('A', 'basic-math-worksheets.html:load', 'initial window.instant presence', {
+              hasInstant: !!window.instant,
+              appIdConfigured: INSTANTDB_APP_ID !== '2275819f-2db8-499c-990a-e37b075e0cef' ? 'custom' : 'set',
+              appId: INSTANTDB_APP_ID
+            });
+            
+            const savedUsers = localStorage.getItem('mathPracticeUsers');
+            const savedData = localStorage.getItem('mathPracticeAllData');
+            const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
+            const savedMeta = localStorage.getItem('mathPracticeMeta');
+
+            if (savedUsers) {
+              const parsedUsers = JSON.parse(savedUsers);
+              setUsers(parsedUsers);
+              if (parsedUsers.length > 0 && !parsedUsers.includes(currentUser)) {
+                setCurrentUser(parsedUsers[0]);
+              }
+            }
+
+            if (savedData) {
+              setAllUserData(JSON.parse(savedData));
+            }
+
+            if (savedSheets) {
+              setSavedWorksheets(JSON.parse(savedSheets));
+            }
+
+            if (savedMeta) {
+              try {
+                setMetaUpdatedAt(JSON.parse(savedMeta));
+              } catch (e) {
+                console.warn('Could not parse meta info', e);
+              }
+            }
+          }, []);
+
+          // Second useEffect - Load categories for current user
+          useEffect(() => {
+            const savedCategories = localStorage.getItem(`categories-${currentUser}`);
+            if (savedCategories) {
+              setCategories(JSON.parse(savedCategories));
+            }
+          }, [currentUser]);
+
+          // Third useEffect - Initialize InstantDB (ONLY ONE INITIALIZATION)
+          useEffect(() => {
+            if (!window.instant || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
             try {
               debugLog('A', 'basic-math-worksheets.html:init', 'attempting init', {
-                hasInstantCore: !!window.InstantCore,
+                hasInstant: !!window.instant,
                 appId: INSTANTDB_APP_ID
               });
-              const { init } = window.InstantCore;
+              
+              const { init } = window.instant;
               const client = init({ appId: INSTANTDB_APP_ID });
               setInstantClient(client);
               
@@ -130,37 +178,7 @@
             }
           }, []);
 
-          useEffect(() => {
-            const savedCategories = localStorage.getItem(`categories-${currentUser}`);
-            if (savedCategories) {
-              setCategories(JSON.parse(savedCategories));
-            }
-          }, [currentUser]);
-
-          useEffect(() => {
-            if (!window.instantdb || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
-            try {
-              debugLog('A', 'basic-math-worksheets.html:init', 'attempting init', {
-                hasInstantDB: !!window.instantdb,
-                appId: INSTANTDB_APP_ID
-              });
-              const client = window.instantdb.init({ appId: INSTANTDB_APP_ID });
-              setInstantClient(client);
-              const unsub = client.auth.onAuthStateChange((user) => {
-                setCloudUser(user || null);
-                setAuthEmailDisplay(user?.email || '');
-              });
-              debugLog('A', 'basic-math-worksheets.html:init', 'init success', {
-                hasClient: !!client,
-                hasAuth: !!client?.auth
-              });
-              return () => unsub && unsub();
-            } catch (err) {
-              debugLog('A', 'basic-math-worksheets.html:init', 'init error', { error: String(err) });
-              console.warn('InstantDB init failed', err);
-            }
-          }, []);
-
+          // Fourth useEffect - Sync with cloud when user logs in
           useEffect(() => {
             if (!cloudUser || !instantClient) return;
             (async () => {
