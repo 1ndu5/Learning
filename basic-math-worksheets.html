@@ -149,34 +149,70 @@
             }
           }, [currentUser]);
 
-          // Third useEffect - Initialize InstantDB (ONLY ONE INITIALIZATION)
+          // Third useEffect - Initialize InstantDB
           useEffect(() => {
             if (!window.instant || INSTANTDB_APP_ID === 'YOUR_INSTANTDB_APP_ID') return;
             try {
-              debugLog('A', 'basic-math-worksheets.html:init', 'attempting init', {
-                hasInstant: !!window.instant,
-                appId: INSTANTDB_APP_ID
-              });
-              
               const { init } = window.instant;
               const client = init({ appId: INSTANTDB_APP_ID });
               setInstantClient(client);
               
-              const unsub = client.auth.onAuthStateChange((user) => {
-                setCloudUser(user || null);
-                setAuthEmailDisplay(user?.email || '');
-              });
+              console.log('InstantDB initialized, checking auth...', client.auth);
               
-              debugLog('A', 'basic-math-worksheets.html:init', 'init success', {
-                hasClient: !!client,
-                hasAuth: !!client?.auth
-              });
-              return () => unsub && unsub();
+              // Set initial auth state if user exists
+              if (client.auth && client.auth.user) {
+                console.log('Found existing user:', client.auth.user);
+                setCloudUser(client.auth.user);
+                setAuthEmailDisplay(client.auth.user.email || '');
+              }
             } catch (err) {
-              debugLog('A', 'basic-math-worksheets.html:init', 'init error', { error: String(err) });
               console.warn('InstantDB init failed', err);
             }
           }, []);
+
+          // Simpler auth button handler
+          const handleAuthButton = async () => {
+            if (!instantClient) {
+              alert('Cloud not configured. Set INSTANTDB_APP_ID and reload.');
+              return;
+            }
+
+            if (cloudUser) {
+              try {
+                await instantClient.auth.signOut();
+                window.location.reload(); // Reload to clear state
+              } catch (err) {
+                console.warn('Sign out failed', err);
+              }
+              return;
+            }
+
+            const email = prompt('Enter your email to receive a login code:');
+            if (!email) return;
+            
+            setLoginInFlight(true);
+            try {
+              await instantClient.auth.sendMagicCode({ email });
+              
+              const code = prompt('Check your email and enter the code you received:');
+              if (!code) {
+                setLoginInFlight(false);
+                return;
+              }
+              
+              const result = await instantClient.auth.signInWithMagicCode({ email, code });
+              console.log('Sign in result:', result);
+              
+              // Reload page to get fresh auth state
+              alert('Successfully signed in! Reloading page...');
+              window.location.reload();
+            } catch (err) {
+              alert(`Could not sign in: ${err.message || 'Unknown error'}`);
+              console.error('Login error:', err);
+            } finally {
+              setLoginInFlight(false);
+            }
+          };
 
           // Fourth useEffect - Sync with cloud when user logs in
           useEffect(() => {
@@ -653,12 +689,6 @@
           };
 
           const handleAuthButton = async () => {
-            debugLog('B', 'basic-math-worksheets.html:handleAuthButton', 'click', {
-              hasInstantClient: !!instantClient,
-              hasCloudUser: !!cloudUser,
-              loginInFlight
-            });
-            
             if (!instantClient) {
               alert('Cloud not configured. Set INSTANTDB_APP_ID and reload.');
               return;
@@ -667,6 +697,7 @@
             if (cloudUser) {
               try {
                 await instantClient.auth.signOut();
+                window.location.reload(); // Reload to clear state
               } catch (err) {
                 console.warn('Sign out failed', err);
               }
@@ -678,22 +709,23 @@
             
             setLoginInFlight(true);
             try {
-              // Send the magic code
               await instantClient.auth.sendMagicCode({ email });
               
-              // Prompt user for the code they received
               const code = prompt('Check your email and enter the code you received:');
               if (!code) {
                 setLoginInFlight(false);
                 return;
               }
               
-              // Sign in with the code
-              await instantClient.auth.signInWithMagicCode({ email, code });
-              alert('Successfully signed in!');
+              const result = await instantClient.auth.signInWithMagicCode({ email, code });
+              console.log('Sign in result:', result);
+              
+              // Reload page to get fresh auth state
+              alert('Successfully signed in! Reloading page...');
+              window.location.reload();
             } catch (err) {
-              alert('Could not sign in. Please check the code and try again.');
-              console.warn(err);
+              alert(`Could not sign in: ${err.message || 'Unknown error'}`);
+              console.error('Login error:', err);
             } finally {
               setLoginInFlight(false);
             }
