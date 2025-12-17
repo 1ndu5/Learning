@@ -44,6 +44,7 @@ function App() {
   const [deletedItems, setDeletedItems] = useState({ users: {}, worksheets: {} });
   const [worksheetDisplayCount, setWorksheetDisplayCount] = useState(5);
   const [statsDisplayCount, setStatsDisplayCount] = useState(20);
+  const [expandedCategories, setExpandedCategories] = useState({});
   const lastSyncedData = useRef({ users: null, allUserData: null, savedWorksheets: null, metaUpdatedAt: null, deletedItems: null });
   const hasLoadedFromCloud = useRef(false);
 
@@ -316,6 +317,138 @@ function App() {
     const recentCorrect = recentAttempts.filter(a => a).length;
     const recentPercentage = recentAttempts.length > 0 ? (recentCorrect / recentAttempts.length) : 1;
     return { ...history, recentPercentage, recentAttempts: recentAttempts.length };
+  };
+
+  // Progress table helpers
+  const getProgressBlocks = (questionType) => {
+    const userData = getCurrentUserData();
+    const questionHistory = userData.questionHistory || {};
+    
+    // Aggregate all attempts for this question type
+    const allAttempts = [];
+    Object.keys(questionHistory).forEach(key => {
+      if (key.startsWith(`${questionType}:`)) {
+        const history = questionHistory[key];
+        if (history.attempts && Array.isArray(history.attempts)) {
+          allAttempts.push(...history.attempts);
+        }
+      }
+    });
+    
+    // Get last 400 questions, divided into 8 blocks of 50
+    const blocks = [];
+    for (let i = 0; i < 8; i++) {
+      const start = Math.max(0, allAttempts.length - 50 * (i + 1));
+      const end = allAttempts.length - 50 * i;
+      if (start >= end) {
+        blocks.push(null);
+      } else {
+        const blockAttempts = allAttempts.slice(start, end);
+        const correct = blockAttempts.filter(a => a).length;
+        const percentage = Math.round((correct / blockAttempts.length) * 100);
+        blocks.push(percentage);
+      }
+    }
+    return blocks;
+  };
+
+  const getPercentageClass = (percentage) => {
+    if (percentage === null) return 'bg-gray-50 text-gray-400';
+    if (percentage >= 95) return 'bg-green-100 text-green-800';
+    if (percentage >= 75) return 'bg-yellow-100 text-yellow-800';
+    return 'bg-red-100 text-red-800';
+  };
+
+  const getCategoryData = () => {
+    const userData = getCurrentUserData();
+    const questionHistory = userData.questionHistory || {};
+    
+    return [
+      {
+        name: 'Number Bonds',
+        types: [
+          { key: 'numberBonds5', label: 'to 5' },
+          { key: 'numberBonds10', label: 'to 10' },
+          { key: 'numberBonds100', label: 'to 100' }
+        ]
+      },
+      {
+        name: 'Addition',
+        types: [
+          { key: 'additionSingle', label: 'Single Digit' },
+          { key: 'additionDoubleNoCarry', label: 'Double Digit (no carry)' },
+          { key: 'additionDoubleCarry', label: 'Double Digit (carrying)' }
+        ]
+      },
+      {
+        name: 'Subtraction',
+        types: [
+          { key: 'subtractionSingle', label: 'Single Digit' },
+          { key: 'subtractionDoubleNoCarry', label: 'Double Digit (no borrowing)' },
+          { key: 'subtractionDoubleCarry', label: 'Double Digit (borrowing)' }
+        ]
+      },
+      {
+        name: 'Multiplication',
+        types: Array.from({ length: 12 }, (_, i) => ({
+          key: `multiplication${i + 1}`,
+          label: `Times ${i + 1}`
+        }))
+      },
+      {
+        name: 'Division',
+        types: Array.from({ length: 12 }, (_, i) => ({
+          key: `division${i + 1}`,
+          label: `Divide by ${i + 1}`
+        }))
+      }
+    ].map(category => {
+      const typesWithData = category.types
+      .map(type => {
+        // Aggregate all attempts for this question type
+        let total = 0;
+        Object.keys(questionHistory).forEach(key => {
+          if (key.startsWith(`${type.key}:`)) {
+            const history = questionHistory[key];
+            total += history.attempts?.length || 0;
+          }
+        });
+        return { ...type, total, blocks: getProgressBlocks(type.key) };
+      })
+      .filter(type => type.total > 0);
+      
+      const categoryTotal = typesWithData.reduce((sum, type) => sum + type.total, 0);
+      
+      // Calculate overall percentage for category
+      let overallPercentage = null;
+      if (categoryTotal > 0) {
+        const totalCorrect = typesWithData.reduce((sum, type) => {
+          let correct = 0;
+          Object.keys(questionHistory).forEach(key => {
+            if (key.startsWith(`${type.key}:`)) {
+              const history = questionHistory[key];
+              correct += history.attempts?.filter(a => a).length || 0;
+            }
+          });
+          return sum + correct;
+        }, 0);
+        overallPercentage = Math.round((totalCorrect / categoryTotal) * 100);
+      }
+      
+      return {
+        ...category,
+        types: typesWithData,
+        total: categoryTotal,
+        overallPercentage
+      };
+    }).filter(category => category.total > 0);
+  };
+
+  const toggleCategory = (categoryName) => {
+    setExpandedCategories(prev => ({
+      ...prev,
+      [categoryName]: !prev[categoryName]
+    }));
   };
 
   // Question generators
@@ -1028,6 +1161,16 @@ function App() {
               </div>
             </div>
 
+            <div className="mb-6 p-4 bg-gray-100 border border-gray-300 rounded">
+              <div className="text-lg">
+                <strong>Total Questions Answered:</strong> {(() => {
+                  const userData = getCurrentUserData();
+                  const questionHistory = userData.questionHistory || {};
+                  return Object.values(questionHistory).reduce((sum, history) => sum + (history.totalAsked || 0), 0);
+                })()}
+              </div>
+            </div>
+
             <div className="flex flex-wrap gap-4 justify-center">
               <button
                 onClick={() => setView('worksheetSettings')}
@@ -1533,6 +1676,18 @@ function App() {
               )}
             </div>
 
+            <button
+              onClick={() => {
+                setCurrentWorksheet(null);
+                setWorksheetId(null);
+                setSelectedWorksheetToGrade('');
+                setView('setup');
+              }}
+              className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 mb-6"
+            >
+              ← Back to Start
+            </button>
+
             {currentWorksheet && (
               <>
                 {currentWorksheet.every(q => q.graded) && (
@@ -1577,17 +1732,6 @@ function App() {
                     </div>
                   </div>
                 )}
-                <button
-                  onClick={() => {
-                    setCurrentWorksheet(null);
-                    setWorksheetId(null);
-                    setSelectedWorksheetToGrade('');
-                    setView('setup');
-                  }}
-                  className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 mb-6"
-                >
-                  ← Back to Start
-                </button>
                 <h3 className="font-semibold mb-3">Or grade individually:</h3>
                 <div className="grid grid-cols-4 gap-6 mb-6">
                   {(() => {
@@ -1661,6 +1805,101 @@ function App() {
               ← Back to Start
             </button>
 
+            {/* Progress by Question Type */}
+            <div className="mb-8">
+              <h2 className="text-xl font-semibold mb-4">Progress by Question Type</h2>
+              <p className="text-sm text-gray-600 mb-4">
+                This table shows the most recent 400 questions for each question type. 
+                The leftmost column shows your most recent 50 questions, and columns move backwards in time from there.
+              </p>
+              
+              {getCategoryData().length === 0 ? (
+                <div className="p-6 bg-gray-50 border border-gray-300 rounded text-center">
+                  <p className="text-gray-600">No question history yet. Complete some worksheets to see your progress!</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300 bg-gray-50">
+                        <th className="text-left py-3 px-4 font-semibold">Question Type</th>
+                        <th className="text-center py-3 px-2 font-semibold w-20">Total</th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Most Recent</div>
+                          <div className="text-xs font-normal text-gray-600">(Last 50 Qs)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(51-100)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(101-150)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(151-200)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(201-250)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(251-300)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(301-350)</div>
+                        </th>
+                        <th className="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div className="text-xs font-semibold text-gray-600">(351-400)</div>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {getCategoryData().map(category => (
+                        <>
+                          <tr
+                            key={category.name}
+                            onClick={() => toggleCategory(category.name)}
+                            className="border-b border-gray-200 bg-gray-50 hover:bg-gray-100 cursor-pointer font-semibold"
+                          >
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-gray-500 transition-transform" style={{
+                                  transform: expandedCategories[category.name] ? 'rotate(90deg)' : 'rotate(0deg)'
+                                }}>
+                                  ▶
+                                </span>
+                                <span>{category.name}</span>
+                              </div>
+                            </td>
+                            <td className="text-center py-3 px-2">{category.total}</td>
+                            <td colSpan="8" className={`text-center py-3 px-2 font-semibold ${getPercentageClass(category.overallPercentage)}`}>
+                              {category.overallPercentage !== null ? `${category.overallPercentage}% overall` : '-'}
+                            </td>
+                          </tr>
+                          {expandedCategories[category.name] && category.types.map(type => (
+                            <tr key={type.key} className="border-b border-gray-200">
+                              <td className="py-3 px-4 pl-12 text-gray-700">{type.label}</td>
+                              <td className="text-center py-3 px-2">{type.total}</td>
+                              {type.blocks.map((block, idx) => (
+                                <td key={idx} className={`text-center py-3 px-2 font-semibold ${getPercentageClass(block)}`}>
+                                  {block !== null ? `${block}%` : '-'}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
             <h2 className="text-xl font-semibold mb-4">Previous Worksheet Results</h2>
 
             {getGradedWorksheets().length === 0 ? (
@@ -1668,6 +1907,7 @@ function App() {
                 <p className="text-gray-600">No graded worksheets yet.</p>
               </div>
             ) : (
+              <>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                 <thead>
@@ -1680,7 +1920,7 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {getGradedWorksheets().map(ws => {
+                    {getGradedWorksheets().slice(0, worksheetDisplayCount).map(ws => {
                       const totalQs = ws.questions?.length || 0;
                       const correct = ws.questions?.filter(q => q.correct).length || 0;
                       const percent = totalQs > 0 ? Math.round((correct / totalQs) * 100) : 0;
@@ -1740,6 +1980,17 @@ function App() {
                   </tbody>
                 </table>
               </div>
+              {getGradedWorksheets().length > worksheetDisplayCount && (
+                <div className="flex justify-center">
+                  <button
+                    onClick={() => setWorksheetDisplayCount(worksheetDisplayCount + 10)}
+                    className="mt-4 bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-gray-700"
+                  >
+                    Load More Results
+                  </button>
+                </div>
+              )}
+            </>
             )}
           </div>
         </div>
