@@ -1,6 +1,233 @@
 import { useState, useEffect, useRef } from 'react';
 import db from './instantdb';
 
+// =============================================================================
+// STORAGE OPTIMIZATION HELPER FUNCTIONS
+// =============================================================================
+
+// Property name mapping for compression
+const PROP_MAP = {
+  // Long -> Short
+  display: 'd',
+  answer: 'a',
+  type: 't',
+  key: 'k',
+  graded: 'g',
+  correct: 'c',
+  id: 'i',
+  attempts: 'at',
+  totalAsked: 'ta',
+  totalCorrect: 'tc',
+  questions: 'q',
+  questionHistory: 'qh',
+  createdAt: 'ca',
+  updatedAt: 'ua'
+};
+
+// Reverse mapping for decompression
+const PROP_MAP_REV = Object.fromEntries(
+  Object.entries(PROP_MAP).map(([k, v]) => [v, k])
+);
+
+// Global question definitions lookup
+let questionDefs = {};
+let keyToQId = {};
+let qIdCounter = 1;
+
+// Binary pack boolean array to hex string
+function packAttempts(boolArray) {
+  if (!boolArray || boolArray.length === 0) return '';
+  const binary = boolArray.map(b => b ? '1' : '0').join('');
+  return parseInt(binary, 2).toString(16).toUpperCase();
+}
+
+// Unpack hex string to boolean array
+function unpackAttempts(hexString, length) {
+  if (!hexString) return [];
+  const binary = parseInt(hexString, 16).toString(2).padStart(length, '0');
+  return binary.split('').map(b => b === '1');
+}
+
+// Get or create question ID
+function getQuestionId(question) {
+  const key = question.key || `${question.type}:${question.display}`;
+  
+  if (!keyToQId[key]) {
+    const id = `q${qIdCounter++}`;
+    keyToQId[key] = id;
+    questionDefs[id] = {
+      d: question.display,
+      a: question.answer,
+      t: question.type
+    };
+  }
+  
+  return keyToQId[key];
+}
+
+// Compress worksheet for storage
+function compressWorksheet(worksheet) {
+  return {
+    i: worksheet.id,
+    ca: new Date(worksheet.createdAt).getTime(),
+    ua: worksheet.updatedAt ? new Date(worksheet.updatedAt).getTime() : new Date(worksheet.createdAt).getTime(),
+    q: worksheet.questions.map(q => ({
+      qi: getQuestionId(q),
+      g: q.graded ? 1 : 0,
+      c: q.correct ? 1 : 0
+    }))
+  };
+}
+
+// Decompress worksheet from storage
+function decompressWorksheet(compressed) {
+  const questions = compressed.q.map((cq, idx) => {
+    const qDef = questionDefs[cq.qi];
+    return {
+      display: qDef.d,
+      answer: qDef.a,
+      type: qDef.t,
+      key: `${qDef.t}:${qDef.d}`,
+      graded: cq.g === 1,
+      correct: cq.c === 1,
+      id: idx
+    };
+  });
+  
+  // Check if all questions are graded
+  const allGraded = questions.length > 0 && questions.every(q => q.graded);
+  
+  return {
+    id: compressed.i,
+    createdAt: new Date(compressed.ca).toISOString(),
+    updatedAt: new Date(compressed.ua).toISOString(),
+    graded: allGraded,  // ← ADD THIS PROPERTY
+    questions: questions
+  };
+}
+
+// Compress question history
+function compressQuestionHistory(questionHistory) {
+  const compressed = {};
+  
+  for (const [key, data] of Object.entries(questionHistory)) {
+    const attemptsLength = data.attempts.length;
+    compressed[key] = {
+      at: packAttempts(data.attempts),
+      l: attemptsLength  // Store length to help with unpacking
+    };
+  }
+  
+  return compressed;
+}
+
+// Decompress question history
+function decompressQuestionHistory(compressed) {
+  const decompressed = {};
+  
+  for (const [key, data] of Object.entries(compressed)) {
+    const attempts = unpackAttempts(data.at, data.l);
+    decompressed[key] = {
+      attempts: attempts,
+      totalAsked: attempts.length,
+      totalCorrect: attempts.filter(a => a).length
+    };
+  }
+  
+  return decompressed;
+}
+
+// Compress all user data
+function compressAllUserData(allUserData) {
+  const compressed = {};
+  
+  for (const [user, userData] of Object.entries(allUserData)) {
+    compressed[user] = {
+      qh: compressQuestionHistory(userData.questionHistory || {}),
+      ua: userData.updatedAt ? new Date(userData.updatedAt).getTime() : Date.now()
+    };
+  }
+  
+  return compressed;
+}
+
+// Decompress all user data
+function decompressAllUserData(compressed) {
+  const decompressed = {};
+  
+  for (const [user, userData] of Object.entries(compressed)) {
+    decompressed[user] = {
+      questionHistory: decompressQuestionHistory(userData.qh || {}),
+      updatedAt: userData.ua ? new Date(userData.ua).toISOString() : new Date().toISOString()
+    };
+  }
+  
+  return decompressed;
+}
+
+// Compress all worksheets
+function compressAllWorksheets(savedWorksheets) {
+  const compressed = {};
+  
+  for (const [user, worksheets] of Object.entries(savedWorksheets)) {
+    compressed[user] = {};
+    for (const [wsId, worksheet] of Object.entries(worksheets)) {
+      compressed[user][wsId] = compressWorksheet(worksheet);
+    }
+  }
+  
+  return compressed;
+}
+
+// Decompress all worksheets
+function decompressAllWorksheets(compressed) {
+  const decompressed = {};
+  
+  for (const [user, worksheets] of Object.entries(compressed)) {
+    decompressed[user] = {};
+    for (const [wsId, worksheet] of Object.entries(worksheets)) {
+      decompressed[user][wsId] = decompressWorksheet(worksheet);
+    }
+  }
+  
+  return decompressed;
+}
+
+// Main compression function
+function compressForStorage(data) {
+  // Reset question definitions for this compression
+  questionDefs = {};
+  keyToQId = {};
+  qIdCounter = 1;
+  
+  const compressed = {
+    v: 2,  // Version 2 = optimized format
+    u: data.users,
+    ud: compressAllUserData(data.allUserData || {}),
+    sw: compressAllWorksheets(data.savedWorksheets || {}),
+    qd: questionDefs  // Store question definitions
+  };
+  
+  return compressed;
+}
+
+// Main decompression function
+function decompressFromStorage(compressed) {
+  // Handle old uncompressed format
+  if (!compressed.v || compressed.v === 1) {
+    return compressed;  // Return as-is if it's old format
+  }
+  
+  // Load question definitions
+  questionDefs = compressed.qd || {};
+  
+  return {
+    users: compressed.u,
+    allUserData: decompressAllUserData(compressed.ud || {}),
+    savedWorksheets: decompressAllWorksheets(compressed.sw || {})
+  };
+}
+
 function App() {
   // InstantDB auth hook
   const { user, isLoading: authLoading } = db.useAuth();
@@ -53,39 +280,58 @@ function App() {
     user ? { userData: { $: { where: { id: user.id } } } } : { userData: {} }
   );
 
-  // Load data from localStorage on mount
-  useEffect(() => {
-    const savedUsers = localStorage.getItem('mathPracticeUsers');
-    const savedData = localStorage.getItem('mathPracticeAllData');
-    const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
-    const savedMeta = localStorage.getItem('mathPracticeMeta');
-    const savedDeleted = localStorage.getItem('mathPracticeDeleted');
+// Load data from localStorage on mount
+useEffect(() => {
+  const savedUsers = localStorage.getItem('mathPracticeUsers');
+  const savedData = localStorage.getItem('mathPracticeAllData');
+  const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
+  const savedMeta = localStorage.getItem('mathPracticeMeta');
+  const savedDeleted = localStorage.getItem('mathPracticeDeleted');
 
-    if (savedUsers) {
-      const parsedUsers = JSON.parse(savedUsers);
-      setUsers(parsedUsers);
-      if (parsedUsers.length > 0 && !parsedUsers.includes(currentUser)) {
-        setCurrentUser(parsedUsers[0]);
-      }
+  if (savedUsers) {
+    const parsedUsers = JSON.parse(savedUsers);
+    setUsers(parsedUsers);
+    if (parsedUsers.length > 0 && !parsedUsers.includes(currentUser)) {
+      setCurrentUser(parsedUsers[0]);
     }
+  }
 
-    if (savedData) setAllUserData(JSON.parse(savedData));
-    if (savedSheets) setSavedWorksheets(JSON.parse(savedSheets));
-    if (savedMeta) {
-      try {
-        setMetaUpdatedAt(JSON.parse(savedMeta));
-      } catch (e) {
-        console.warn('Could not parse meta info', e);
-      }
+  // Decompress data on load
+  if (savedData) {
+    try {
+      const parsed = JSON.parse(savedData);
+      const decompressed = decompressFromStorage(parsed);
+      setAllUserData(decompressed.allUserData || decompressed);
+    } catch (e) {
+      console.warn('Could not parse user data', e);
     }
-    if (savedDeleted) {
-      try {
-        setDeletedItems(JSON.parse(savedDeleted));
-      } catch (e) {
-        console.warn('Could not parse deleted items', e);
-      }
+  }
+  
+  if (savedSheets) {
+    try {
+      const parsed = JSON.parse(savedSheets);
+      const decompressed = decompressFromStorage(parsed);
+      setSavedWorksheets(decompressed.savedWorksheets || decompressed);
+    } catch (e) {
+      console.warn('Could not parse worksheets', e);
     }
-  }, []);
+  }
+  
+  if (savedMeta) {
+    try {
+      setMetaUpdatedAt(JSON.parse(savedMeta));
+    } catch (e) {
+      console.warn('Could not parse meta info', e);
+    }
+  }
+  if (savedDeleted) {
+    try {
+      setDeletedItems(JSON.parse(savedDeleted));
+    } catch (e) {
+      console.warn('Could not parse deleted items', e);
+    }
+  }
+}, []);
 
   // Load categories for current user
   useEffect(() => {
@@ -142,7 +388,15 @@ function App() {
     const stamped = { ...userData, updatedAt: new Date().toISOString() };
     const newAllData = { ...allUserData, [currentUser]: stamped };
     setAllUserData(newAllData);
-    localStorage.setItem('mathPracticeAllData', JSON.stringify(newAllData));
+    
+    // Compress before saving
+    const compressed = compressForStorage({
+      users: users,
+      allUserData: newAllData,
+      savedWorksheets: savedWorksheets
+    });
+    localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+    
     touchMeta('allUserData');
   };
 
@@ -160,7 +414,19 @@ function App() {
       });
     });
     setSavedWorksheets(worksheets);
-    localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify(worksheets));
+    
+    // Compress before saving
+    const compressed = compressForStorage({
+      users: users,
+      allUserData: allUserData,
+      savedWorksheets: worksheets
+    });
+    localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
+      v: 2,
+      sw: compressed.sw,
+      qd: compressed.qd
+    }));
+    
     touchMeta('savedWorksheets');
   };
 
@@ -228,16 +494,17 @@ function App() {
 
   // Backup functions
   const handleExport = () => {
-    const exportData = {
+    // Compress the data before exporting
+    const compressed = compressForStorage({
       users,
       allUserData,
-      savedWorksheets,
-      metaUpdatedAt,
-      exportedAt: new Date().toISOString(),
-      version: '1.0'
-    };
+      savedWorksheets
+    });
     
-    const dataStr = JSON.stringify(exportData, null, 2);
+    // Add export metadata
+    compressed.exportedAt = new Date().toISOString();
+    
+    const dataStr = JSON.stringify(compressed, null, 2);
     const blob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -258,9 +525,18 @@ function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const importData = JSON.parse(e.target.result);
+        const rawData = JSON.parse(e.target.result);
         
-        // Validate the data has expected structure
+        // Check for new optimized format
+        if (rawData.v !== 2) {
+          alert('Invalid backup file format. Please use an optimized backup file.');
+          return;
+        }
+        
+        // Decompress the data
+        const importData = decompressFromStorage(rawData);
+        
+        // Validate the decompressed data
         if (!importData.users || !importData.allUserData || !importData.savedWorksheets) {
           alert('Invalid backup file format');
           return;
@@ -271,20 +547,25 @@ function App() {
           setUsers(importData.users);
           setAllUserData(importData.allUserData);
           setSavedWorksheets(importData.savedWorksheets);
-          setMetaUpdatedAt(importData.metaUpdatedAt || { users: null, allUserData: null, savedWorksheets: null });
+          setMetaUpdatedAt({ users: null, allUserData: null, savedWorksheets: null });
           
-          // Update localStorage
+          // Compress before saving to localStorage
+          const compressed = compressForStorage(importData);
           localStorage.setItem('mathPracticeUsers', JSON.stringify(importData.users));
-          localStorage.setItem('mathPracticeAllData', JSON.stringify(importData.allUserData));
-          localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify(importData.savedWorksheets));
-          localStorage.setItem('mathPracticeMeta', JSON.stringify(importData.metaUpdatedAt || {}));
+          localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+          localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
+            v: 2,
+            sw: compressed.sw,
+            qd: compressed.qd
+          }));
+          localStorage.setItem('mathPracticeMeta', JSON.stringify({ users: null, allUserData: null, savedWorksheets: null }));
           
           // Update lastSyncedData ref
           lastSyncedData.current = {
             users: JSON.parse(JSON.stringify(importData.users)),
             allUserData: JSON.parse(JSON.stringify(importData.allUserData)),
             savedWorksheets: JSON.parse(JSON.stringify(importData.savedWorksheets)),
-            metaUpdatedAt: JSON.parse(JSON.stringify(importData.metaUpdatedAt || {}))
+            metaUpdatedAt: { users: null, allUserData: null, savedWorksheets: null }
           };
           
           alert('Data imported successfully!');
@@ -841,17 +1122,22 @@ function App() {
 
     const syncToCloud = async () => {
       try {
+        // Compress data before sending to cloud
+        const compressed = compressForStorage({
+          users,
+          allUserData,
+          savedWorksheets
+        });
+        
         await db.transact(
           db.tx.userData[user.id].update({
-            users,
-            allUserData,
-            savedWorksheets,
+            dataV2: compressed,
             metaUpdatedAt,
             deletedItems,
             updatedAt: new Date().toISOString()
           })
         );
-        console.log('✅ Synced to cloud');
+        console.log('✅ Synced to cloud (compressed)');
         // Update ref to current state
         lastSyncedData.current = {
           users: JSON.parse(JSON.stringify(users)),
@@ -878,231 +1164,247 @@ function App() {
     
     const userRecord = cloudData?.userData?.[0];
     
-    if (userRecord) {
-      console.log('✅ Found user record:', userRecord);
+    if (userRecord && userRecord.dataV2) {
+      console.log('✅ Found user record with compressed data');
+      
+      // Decompress cloud data
+      const cloudDecompressed = decompressFromStorage(userRecord.dataV2);
+      const cloudUsers = cloudDecompressed.users || [];
+      const cloudAllUserData = cloudDecompressed.allUserData || {};
+      const cloudSavedWorksheets = cloudDecompressed.savedWorksheets || {};
       
       const cloudMeta = userRecord.metaUpdatedAt || {};
       const localMeta = metaUpdatedAt || {};
       
       // MERGE USERS - combine both lists, respect deletions with timestamp comparison
-      if (userRecord.users) {
-        const localUsers = users || ['Default'];
-        const cloudUsers = userRecord.users || [];
-        const localDeleted = deletedItems.users || {};
-        const cloudDeleted = userRecord.deletedItems?.users || {};
-        const localMetaTime = metaUpdatedAt?.users || '1970-01-01';
-        const cloudMetaTime = userRecord.metaUpdatedAt?.users || '1970-01-01';
+      const localUsers = users || ['Default'];
+      const localDeleted = deletedItems.users || {};
+      const cloudDeleted = userRecord.deletedItems?.users || {};
+      const localMetaTime = metaUpdatedAt?.users || '1970-01-01';
+      const cloudMetaTime = userRecord.metaUpdatedAt?.users || '1970-01-01';
+      
+      // Combine all users from both sources
+      const combinedUsers = [...new Set([...localUsers, ...cloudUsers])];
+      
+      // Merge deleted lists with timestamp comparison
+      const mergedDeleted = { ...localDeleted };
+      Object.keys(cloudDeleted).forEach(userName => {
+        if (!mergedDeleted[userName] || cloudDeleted[userName] > mergedDeleted[userName]) {
+          mergedDeleted[userName] = cloudDeleted[userName];
+        }
+      });
+      
+      // For each user, check if they should be kept based on timestamps
+      const mergedUsers = combinedUsers.filter(userName => {
+        const deletionTime = mergedDeleted[userName];
         
-        // Combine all users from both sources
-        const combinedUsers = [...new Set([...localUsers, ...cloudUsers])];
-        
-        // Merge deleted lists with timestamp comparison
-        const mergedDeleted = { ...localDeleted };
-        Object.keys(cloudDeleted).forEach(userName => {
-          if (!mergedDeleted[userName] || cloudDeleted[userName] > mergedDeleted[userName]) {
-            mergedDeleted[userName] = cloudDeleted[userName];
-          }
-        });
-        
-        // For each user, check if they should be kept based on timestamps
-        const mergedUsers = combinedUsers.filter(userName => {
-          const deletionTime = mergedDeleted[userName];
-          
-          if (!deletionTime) {
-            // Not deleted, keep the user
-            return true;
-          }
-          
-          // User was deleted - compare deletion time with when users list was last updated
-          // If user exists locally and local meta is newer than deletion, keep local
-          if (localUsers.includes(userName) && localMetaTime > deletionTime) {
-            // Local recreation is newer than deletion
-            delete mergedDeleted[userName]; // Clear the tombstone
-            return true;
-          }
-          
-          // If user exists in cloud and cloud meta is newer than deletion, keep cloud
-          if (cloudUsers.includes(userName) && cloudMetaTime > deletionTime) {
-            // Cloud recreation is newer than deletion
-            delete mergedDeleted[userName]; // Clear the tombstone
-            return true;
-          }
-          
-          // Deletion is newer than any recreation, filter out
-          return false;
-        });
-        
-        if (JSON.stringify(mergedUsers.sort()) !== JSON.stringify(localUsers.sort())) {
-          console.log('Merging users from cloud');
-          setUsers(mergedUsers);
-          localStorage.setItem('mathPracticeUsers', JSON.stringify(mergedUsers));
-          lastSyncedData.current.users = JSON.parse(JSON.stringify(mergedUsers));
+        if (!deletionTime) {
+          // Not deleted, keep the user
+          return true;
         }
         
-        // Update merged deleted items (with tombstones cleared for recreated users)
-        const newDeletedItems = { ...deletedItems, users: mergedDeleted };
-        if (JSON.stringify(newDeletedItems) !== JSON.stringify(deletedItems)) {
-          setDeletedItems(newDeletedItems);
-          localStorage.setItem('mathPracticeDeleted', JSON.stringify(newDeletedItems));
-          lastSyncedData.current.deletedItems = JSON.parse(JSON.stringify(newDeletedItems));
+        // User was deleted - compare deletion time with when users list was last updated
+        // If user exists locally and local meta is newer than deletion, keep local
+        if (localUsers.includes(userName) && localMetaTime > deletionTime) {
+          // Local recreation is newer than deletion
+          delete mergedDeleted[userName]; // Clear the tombstone
+          return true;
         }
+        
+        // If user exists in cloud and cloud meta is newer than deletion, keep cloud
+        if (cloudUsers.includes(userName) && cloudMetaTime > deletionTime) {
+          // Cloud recreation is newer than deletion
+          delete mergedDeleted[userName]; // Clear the tombstone
+          return true;
+        }
+        
+        // Deletion is newer than any recreation, filter out
+        return false;
+      });
+      
+      if (JSON.stringify(mergedUsers.sort()) !== JSON.stringify(localUsers.sort())) {
+        console.log('Merging users from cloud');
+        setUsers(mergedUsers);
+        localStorage.setItem('mathPracticeUsers', JSON.stringify(mergedUsers));
+        lastSyncedData.current.users = JSON.parse(JSON.stringify(mergedUsers));
       }
-        
+      
+      // Update merged deleted items (with tombstones cleared for recreated users)
+      const newDeletedItems = { ...deletedItems, users: mergedDeleted };
+      if (JSON.stringify(newDeletedItems) !== JSON.stringify(deletedItems)) {
+        setDeletedItems(newDeletedItems);
+        localStorage.setItem('mathPracticeDeleted', JSON.stringify(newDeletedItems));
+        lastSyncedData.current.deletedItems = JSON.parse(JSON.stringify(newDeletedItems));
+      }
+      
       // MERGE USER DATA - per-user granular merge
-      if (userRecord.allUserData) {
-        const localData = allUserData || {};
-        const cloudData = userRecord.allUserData || {};
-        const mergedData = { ...localData };
+      const localData = allUserData || {};
+      const mergedData = { ...localData };
+      
+      // For each user in cloud data
+      Object.keys(cloudAllUserData).forEach(userName => {
+        const cloudUserData = cloudAllUserData[userName];
+        const localUserData = localData[userName];
         
-        // For each user in cloud data
-        Object.keys(cloudData).forEach(userName => {
-          const cloudUserData = cloudData[userName];
-          const localUserData = localData[userName];
+        if (!localUserData) {
+          // User only exists in cloud - take cloud data
+          mergedData[userName] = cloudUserData;
+        } else {
+          // User exists in both - compare timestamps
+          const cloudUpdated = cloudUserData.updatedAt || '1970-01-01';
+          const localUpdated = localUserData.updatedAt || '1970-01-01';
           
-          if (!localUserData) {
-            // User only exists in cloud - take cloud data
+          if (cloudUpdated > localUpdated) {
+            // Cloud data is newer for this user
             mergedData[userName] = cloudUserData;
-          } else {
-            // User exists in both - compare timestamps
-            const cloudUpdated = cloudUserData.updatedAt || '1970-01-01';
-            const localUpdated = localUserData.updatedAt || '1970-01-01';
-            
-            if (cloudUpdated > localUpdated) {
-              // Cloud data is newer for this user
-              mergedData[userName] = cloudUserData;
-            }
-            // else keep local (already in mergedData)
           }
-        });
-        
-        if (JSON.stringify(mergedData) !== JSON.stringify(localData)) {
-          console.log('Merging allUserData from cloud');
-          setAllUserData(mergedData);
-          localStorage.setItem('mathPracticeAllData', JSON.stringify(mergedData));
-          lastSyncedData.current.allUserData = JSON.parse(JSON.stringify(mergedData));
+          // else keep local (already in mergedData)
         }
+      });
+      
+      if (JSON.stringify(mergedData) !== JSON.stringify(localData)) {
+        console.log('Merging allUserData from cloud');
+        setAllUserData(mergedData);
+        
+        // Save compressed to localStorage
+        const compressed = compressForStorage({
+          users: mergedUsers,
+          allUserData: mergedData,
+          savedWorksheets: savedWorksheets
+        });
+        localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+        
+        lastSyncedData.current.allUserData = JSON.parse(JSON.stringify(mergedData));
       }
       
       // MERGE WORKSHEETS - per-worksheet granular merge, respect deletions with timestamp comparison
-      if (userRecord.savedWorksheets) {
-        const localSheets = savedWorksheets || {};
-        const cloudSheets = userRecord.savedWorksheets || {};
-        const localDeletedWorksheets = deletedItems.worksheets || {};
-        const cloudDeletedWorksheets = userRecord.deletedItems?.worksheets || {};
-        const localMetaTime = metaUpdatedAt?.savedWorksheets || '1970-01-01';
-        const cloudMetaTime = userRecord.metaUpdatedAt?.savedWorksheets || '1970-01-01';
+      const localSheets = savedWorksheets || {};
+      const localDeletedWorksheets = deletedItems.worksheets || {};
+      const cloudDeletedWorksheets = userRecord.deletedItems?.worksheets || {};
+      const localMetaTimeWs = metaUpdatedAt?.savedWorksheets || '1970-01-01';
+      const cloudMetaTimeWs = userRecord.metaUpdatedAt?.savedWorksheets || '1970-01-01';
+      
+      // Merge deleted worksheets (keep most recent deletion timestamp)
+      const mergedDeletedWorksheets = { ...localDeletedWorksheets };
+      Object.keys(cloudDeletedWorksheets).forEach(key => {
+        if (!mergedDeletedWorksheets[key] || cloudDeletedWorksheets[key] > mergedDeletedWorksheets[key]) {
+          mergedDeletedWorksheets[key] = cloudDeletedWorksheets[key];
+        }
+      });
+      
+      const mergedSheets = { ...localSheets };
+      
+      // For each user in cloud worksheets
+      Object.keys(cloudSavedWorksheets).forEach(userName => {
+        const cloudUserSheets = cloudSavedWorksheets[userName] || {};
+        const localUserSheets = localSheets[userName] || {};
         
-        // Merge deleted worksheets (keep most recent deletion timestamp)
-        const mergedDeletedWorksheets = { ...localDeletedWorksheets };
-        Object.keys(cloudDeletedWorksheets).forEach(key => {
-          if (!mergedDeletedWorksheets[key] || cloudDeletedWorksheets[key] > mergedDeletedWorksheets[key]) {
-            mergedDeletedWorksheets[key] = cloudDeletedWorksheets[key];
-          }
-        });
+        if (!mergedSheets[userName]) {
+          mergedSheets[userName] = {};
+        }
         
-        const mergedSheets = { ...localSheets };
-        
-        // For each user in cloud worksheets
-        Object.keys(cloudSheets).forEach(userName => {
-          const cloudUserSheets = cloudSheets[userName] || {};
-          const localUserSheets = localSheets[userName] || {};
+        // For each worksheet for this user
+        Object.keys(cloudUserSheets).forEach(worksheetId => {
+          const worksheetKey = `${userName}:${worksheetId}`;
+          const deletionTime = mergedDeletedWorksheets[worksheetKey];
           
-          if (!mergedSheets[userName]) {
-            mergedSheets[userName] = {};
-          }
+          const cloudWorksheet = cloudUserSheets[worksheetId];
+          const localWorksheet = localUserSheets[worksheetId];
           
-          // For each worksheet for this user
-          Object.keys(cloudUserSheets).forEach(worksheetId => {
-            const worksheetKey = `${userName}:${worksheetId}`;
-            const deletionTime = mergedDeletedWorksheets[worksheetKey];
+          // Check if worksheet was deleted and compare with creation/update times
+          if (deletionTime) {
+            const worksheetTime = cloudWorksheet?.updatedAt || cloudWorksheet?.createdAt || localWorksheet?.updatedAt || localWorksheet?.createdAt;
             
-            const cloudWorksheet = cloudUserSheets[worksheetId];
-            const localWorksheet = localUserSheets[worksheetId];
-            
-            // Check if worksheet was deleted and compare with creation/update times
-            if (deletionTime) {
-              const worksheetTime = cloudWorksheet?.updatedAt || cloudWorksheet?.createdAt || localWorksheet?.updatedAt || localWorksheet?.createdAt;
-              
-              // If worksheet exists and was created/updated after deletion, keep it and clear tombstone
-              if (worksheetTime && worksheetTime > deletionTime) {
-                delete mergedDeletedWorksheets[worksheetKey];
-              } else {
-                // Deletion is newer, skip this worksheet
-                delete mergedSheets[userName][worksheetId];
-                return;
-              }
-            }
-            
-            if (!localWorksheet) {
-              // Worksheet only exists in cloud - take cloud version
-              mergedSheets[userName][worksheetId] = cloudWorksheet;
-            } else if (!cloudWorksheet) {
-              // Worksheet only exists locally - keep local version (already in mergedSheets)
+            // If worksheet exists and was created/updated after deletion, keep it and clear tombstone
+            if (worksheetTime && worksheetTime > deletionTime) {
+              delete mergedDeletedWorksheets[worksheetKey];
             } else {
-              // Worksheet exists in both - compare timestamps
-              // Prefer graded over ungraded, then use updatedAt/createdAt
-              const cloudUpdated = cloudWorksheet.updatedAt || cloudWorksheet.createdAt || '1970-01-01';
-              const localUpdated = localWorksheet.updatedAt || localWorksheet.createdAt || '1970-01-01';
-              
-              // If one is graded and other isn't, prefer graded
-              if (cloudWorksheet.graded && !localWorksheet.graded) {
-                mergedSheets[userName][worksheetId] = cloudWorksheet;
-              } else if (localWorksheet.graded && !cloudWorksheet.graded) {
-                // Keep local (already in mergedSheets)
-              } else if (cloudUpdated > localUpdated) {
-                // Cloud is newer
-                mergedSheets[userName][worksheetId] = cloudWorksheet;
-              }
-              // else keep local (already in mergedSheets)
+              // Deletion is newer, skip this worksheet
+              delete mergedSheets[userName][worksheetId];
+              return;
             }
-          });
-        });
-        
-        // Also check local worksheets that might not be in cloud
-        Object.keys(localSheets).forEach(userName => {
-          const localUserSheets = localSheets[userName] || {};
-          Object.keys(localUserSheets).forEach(worksheetId => {
-            const worksheetKey = `${userName}:${worksheetId}`;
-            const deletionTime = mergedDeletedWorksheets[worksheetKey];
+          }
+          
+          if (!localWorksheet) {
+            // Worksheet only exists in cloud - take cloud version
+            mergedSheets[userName][worksheetId] = cloudWorksheet;
+          } else if (!cloudWorksheet) {
+            // Worksheet only exists locally - keep local version (already in mergedSheets)
+          } else {
+            // Worksheet exists in both - compare timestamps
+            const cloudUpdated = cloudWorksheet.updatedAt || cloudWorksheet.createdAt || '1970-01-01';
+            const localUpdated = localWorksheet.updatedAt || localWorksheet.createdAt || '1970-01-01';
             
-            if (deletionTime) {
-              const localWorksheet = localUserSheets[worksheetId];
-              const worksheetTime = localWorksheet?.updatedAt || localWorksheet?.createdAt;
-              
-              // If worksheet was created/updated after deletion, clear tombstone
-              if (worksheetTime && worksheetTime > deletionTime) {
-                delete mergedDeletedWorksheets[worksheetKey];
-              } else {
-                // Deletion is newer, remove worksheet
-                if (mergedSheets[userName]) {
-                  delete mergedSheets[userName][worksheetId];
-                }
+            // If one is graded and other isn't, prefer graded
+            if (cloudWorksheet.graded && !localWorksheet.graded) {
+              mergedSheets[userName][worksheetId] = cloudWorksheet;
+            } else if (localWorksheet.graded && !cloudWorksheet.graded) {
+              // Keep local (already in mergedSheets)
+            } else if (cloudUpdated > localUpdated) {
+              // Cloud is newer
+              mergedSheets[userName][worksheetId] = cloudWorksheet;
+            }
+            // else keep local (already in mergedSheets)
+          }
+        });
+      });
+      
+      // Also check local worksheets that might not be in cloud
+      Object.keys(localSheets).forEach(userName => {
+        const localUserSheets = localSheets[userName] || {};
+        Object.keys(localUserSheets).forEach(worksheetId => {
+          const worksheetKey = `${userName}:${worksheetId}`;
+          const deletionTime = mergedDeletedWorksheets[worksheetKey];
+          
+          if (deletionTime) {
+            const localWorksheet = localUserSheets[worksheetId];
+            const worksheetTime = localWorksheet?.updatedAt || localWorksheet?.createdAt;
+            
+            // If worksheet was created/updated after deletion, clear tombstone
+            if (worksheetTime && worksheetTime > deletionTime) {
+              delete mergedDeletedWorksheets[worksheetKey];
+            } else {
+              // Deletion is newer, remove worksheet
+              if (mergedSheets[userName]) {
+                delete mergedSheets[userName][worksheetId];
               }
             }
-          });
+          }
         });
+      });
+      
+      if (JSON.stringify(mergedSheets) !== JSON.stringify(localSheets)) {
+        console.log('Merging savedWorksheets from cloud');
+        setSavedWorksheets(mergedSheets);
         
-        if (JSON.stringify(mergedSheets) !== JSON.stringify(localSheets)) {
-          console.log('Merging savedWorksheets from cloud');
-          setSavedWorksheets(mergedSheets);
-          localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify(mergedSheets));
-          lastSyncedData.current.savedWorksheets = JSON.parse(JSON.stringify(mergedSheets));
-        }
+        // Save compressed to localStorage
+        const compressed = compressForStorage({
+          users: mergedUsers,
+          allUserData: mergedData,
+          savedWorksheets: mergedSheets
+        });
+        localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
+          v: 2,
+          sw: compressed.sw,
+          qd: compressed.qd
+        }));
         
-        // Update merged deleted worksheets (with tombstones cleared for recreated worksheets)
-        const newDeletedItems = { ...deletedItems, worksheets: mergedDeletedWorksheets };
-        if (JSON.stringify(newDeletedItems.worksheets) !== JSON.stringify(deletedItems.worksheets)) {
-          setDeletedItems(newDeletedItems);
-          localStorage.setItem('mathPracticeDeleted', JSON.stringify(newDeletedItems));
-          lastSyncedData.current.deletedItems = JSON.parse(JSON.stringify(newDeletedItems));
-        }
+        lastSyncedData.current.savedWorksheets = JSON.parse(JSON.stringify(mergedSheets));
+      }
+      
+      // Update merged deleted worksheets (with tombstones cleared for recreated worksheets)
+      const newDeletedItemsWs = { ...deletedItems, worksheets: mergedDeletedWorksheets };
+      if (JSON.stringify(newDeletedItemsWs.worksheets) !== JSON.stringify(deletedItems.worksheets)) {
+        setDeletedItems(newDeletedItemsWs);
+        localStorage.setItem('mathPracticeDeleted', JSON.stringify(newDeletedItemsWs));
+        lastSyncedData.current.deletedItems = JSON.parse(JSON.stringify(newDeletedItemsWs));
       }
       
       // Update metadata to reflect the merge
       if (cloudMeta && Object.keys(cloudMeta).length > 0) {
         const now = new Date().toISOString();
         const updatedMeta = {
-          users: now, // Always update since we merged
+          users: now,
           allUserData: now,
           savedWorksheets: now
         };
@@ -1110,6 +1412,8 @@ function App() {
         localStorage.setItem('mathPracticeMeta', JSON.stringify(updatedMeta));
         lastSyncedData.current.metaUpdatedAt = JSON.parse(JSON.stringify(updatedMeta));
       }
+    } else if (userRecord) {
+      console.log('⚠️ User record found but no dataV2 - this is expected for first sync');
     } else {
       console.log('⚠️ No record found for user:', user.id);
     }
