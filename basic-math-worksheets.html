@@ -1,0 +1,1812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Math Practice Worksheet Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    @media print {
+      body * { visibility: hidden; }
+      #printable, #printable * { visibility: visible; }
+      #printable { position: absolute; left: 0; top: 0; }
+    }
+    @page { margin: 0; }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-100">
+  <div id="app"></div>
+
+  <script>
+    // =============================================================================
+    // STATE MANAGEMENT
+    // =============================================================================
+    const state = {
+      view: 'setup',
+      currentWorksheet: null,
+      worksheetId: null,
+      quickGradeWrong: '',
+      quickGradeIncomplete: '',
+      selectedWorksheetToGrade: '',
+      gradingHistory: [],
+      users: ['Default'],
+      currentUser: 'Default',
+      showUserModal: false,
+      newUserName: '',
+      editingUsers: false,
+      showBackupModal: false,
+      categories: {
+        numberBonds5: false,
+        numberBonds10: false,
+        numberBonds100: false,
+        additionSingle: false,
+        additionDoubleNoCarry: false,
+        additionDoubleCarry: false,
+        subtractionSingle: false,
+        subtractionDoubleNoCarry: false,
+        subtractionDoubleCarry: false,
+        multiplication: [],
+        division: []
+      },
+      adaptiveWeight: 0.5,
+      allUserData: {},
+      savedWorksheets: {},
+      worksheetDisplayCount: 5,
+      expandedCategories: {}
+    };
+
+    // =============================================================================
+    // STORAGE COMPRESSION HELPERS
+    // =============================================================================
+    let questionDefs = {};
+    let keyToQId = {};
+    let qIdCounter = 1;
+
+    function packAttempts(boolArray) {
+      if (!boolArray || boolArray.length === 0) return '';
+      const binary = boolArray.map(b => b ? '1' : '0').join('');
+      return parseInt(binary, 2).toString(16).toUpperCase();
+    }
+
+    function unpackAttempts(hexString, length) {
+      if (!hexString) return [];
+      const binary = parseInt(hexString, 16).toString(2).padStart(length, '0');
+      return binary.split('').map(b => b === '1');
+    }
+
+    function getQuestionId(question) {
+      const key = question.key || `${question.type}:${question.display}`;
+      if (!keyToQId[key]) {
+        const id = `q${qIdCounter++}`;
+        keyToQId[key] = id;
+        questionDefs[id] = { d: question.display, a: question.answer, t: question.type };
+      }
+      return keyToQId[key];
+    }
+
+    function compressWorksheet(worksheet) {
+      return {
+        i: worksheet.id,
+        ca: new Date(worksheet.createdAt).getTime(),
+        ua: worksheet.updatedAt ? new Date(worksheet.updatedAt).getTime() : new Date(worksheet.createdAt).getTime(),
+        q: worksheet.questions.map(q => ({
+          qi: getQuestionId(q),
+          g: q.graded ? 1 : 0,
+          c: q.correct ? 1 : 0
+        }))
+      };
+    }
+
+    function decompressWorksheet(compressed) {
+      const questions = compressed.q.map((cq, idx) => {
+        const qDef = questionDefs[cq.qi];
+        return {
+          display: qDef.d,
+          answer: qDef.a,
+          type: qDef.t,
+          key: `${qDef.t}:${qDef.d}`,
+          graded: cq.g === 1,
+          correct: cq.c === 1,
+          id: idx
+        };
+      });
+      const allGraded = questions.length > 0 && questions.every(q => q.graded);
+      return {
+        id: compressed.i,
+        createdAt: new Date(compressed.ca).toISOString(),
+        updatedAt: new Date(compressed.ua).toISOString(),
+        graded: allGraded,
+        questions: questions
+      };
+    }
+
+    function compressQuestionHistory(questionHistory) {
+      const compressed = {};
+      for (const [key, data] of Object.entries(questionHistory)) {
+        const attemptsLength = data.attempts.length;
+        compressed[key] = { at: packAttempts(data.attempts), l: attemptsLength };
+      }
+      return compressed;
+    }
+
+    function decompressQuestionHistory(compressed) {
+      const decompressed = {};
+      for (const [key, data] of Object.entries(compressed)) {
+        const attempts = unpackAttempts(data.at, data.l);
+        decompressed[key] = {
+          attempts: attempts,
+          totalAsked: attempts.length,
+          totalCorrect: attempts.filter(a => a).length
+        };
+      }
+      return decompressed;
+    }
+
+    function compressAllUserData(allUserData) {
+      const compressed = {};
+      for (const [user, userData] of Object.entries(allUserData)) {
+        compressed[user] = {
+          qh: compressQuestionHistory(userData.questionHistory || {}),
+          ua: userData.updatedAt ? new Date(userData.updatedAt).getTime() : Date.now()
+        };
+      }
+      return compressed;
+    }
+
+    function decompressAllUserData(compressed) {
+      const decompressed = {};
+      for (const [user, userData] of Object.entries(compressed)) {
+        decompressed[user] = {
+          questionHistory: decompressQuestionHistory(userData.qh || {}),
+          updatedAt: userData.ua ? new Date(userData.ua).toISOString() : new Date().toISOString()
+        };
+      }
+      return decompressed;
+    }
+
+    function compressAllWorksheets(savedWorksheets) {
+      const compressed = {};
+      for (const [user, worksheets] of Object.entries(savedWorksheets)) {
+        compressed[user] = {};
+        for (const [wsId, worksheet] of Object.entries(worksheets)) {
+          compressed[user][wsId] = compressWorksheet(worksheet);
+        }
+      }
+      return compressed;
+    }
+
+    function decompressAllWorksheets(compressed) {
+      const decompressed = {};
+      for (const [user, worksheets] of Object.entries(compressed)) {
+        decompressed[user] = {};
+        for (const [wsId, worksheet] of Object.entries(worksheets)) {
+          decompressed[user][wsId] = decompressWorksheet(worksheet);
+        }
+      }
+      return decompressed;
+    }
+
+    function compressForStorage(data) {
+      questionDefs = {};
+      keyToQId = {};
+      qIdCounter = 1;
+      return {
+        v: 2,
+        u: data.users,
+        ud: compressAllUserData(data.allUserData || {}),
+        sw: compressAllWorksheets(data.savedWorksheets || {}),
+        qd: questionDefs
+      };
+    }
+
+    function decompressFromStorage(compressed) {
+      if (!compressed.v || compressed.v === 1) return compressed;
+      questionDefs = compressed.qd || {};
+      return {
+        users: compressed.u,
+        allUserData: decompressAllUserData(compressed.ud || {}),
+        savedWorksheets: decompressAllWorksheets(compressed.sw || {})
+      };
+    }
+
+    // =============================================================================
+    // LOCAL STORAGE
+    // =============================================================================
+    function loadFromStorage() {
+      const savedUsers = localStorage.getItem('mathPracticeUsers');
+      const savedData = localStorage.getItem('mathPracticeAllData');
+      const savedSheets = localStorage.getItem('mathPracticeSavedWorksheets');
+
+      if (savedUsers) {
+        const parsedUsers = JSON.parse(savedUsers);
+        state.users = parsedUsers;
+        if (parsedUsers.length > 0 && !parsedUsers.includes(state.currentUser)) {
+          state.currentUser = parsedUsers[0];
+        }
+      }
+
+      if (savedData) {
+        try {
+          const parsed = JSON.parse(savedData);
+          const decompressed = decompressFromStorage(parsed);
+          state.allUserData = decompressed.allUserData || decompressed;
+        } catch (e) { console.warn('Could not parse user data', e); }
+      }
+
+      if (savedSheets) {
+        try {
+          const parsed = JSON.parse(savedSheets);
+          const decompressed = decompressFromStorage(parsed);
+          state.savedWorksheets = decompressed.savedWorksheets || decompressed;
+        } catch (e) { console.warn('Could not parse worksheets', e); }
+      }
+
+      // Load categories for current user
+      const savedCategories = localStorage.getItem(`categories-${state.currentUser}`);
+      if (savedCategories) {
+        state.categories = JSON.parse(savedCategories);
+      }
+    }
+
+    function saveUsers(userList) {
+      state.users = userList;
+      localStorage.setItem('mathPracticeUsers', JSON.stringify(userList));
+    }
+
+    function saveUserData(userData) {
+      const stamped = { ...userData, updatedAt: new Date().toISOString() };
+      state.allUserData[state.currentUser] = stamped;
+      const compressed = compressForStorage({
+        users: state.users,
+        allUserData: state.allUserData,
+        savedWorksheets: state.savedWorksheets
+      });
+      localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+    }
+
+    function saveWorksheets(worksheets) {
+      const now = new Date().toISOString();
+      Object.values(worksheets).forEach(userWs => {
+        Object.values(userWs || {}).forEach(ws => {
+          if (!ws.updatedAt) ws.updatedAt = ws.createdAt || now;
+        });
+      });
+      state.savedWorksheets = worksheets;
+      const compressed = compressForStorage({
+        users: state.users,
+        allUserData: state.allUserData,
+        savedWorksheets: worksheets
+      });
+      localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
+        v: 2,
+        sw: compressed.sw,
+        qd: compressed.qd
+      }));
+    }
+
+    function getCurrentUserData() {
+      return state.allUserData[state.currentUser] || { questionHistory: {} };
+    }
+
+    // =============================================================================
+    // QUESTION GENERATORS
+    // =============================================================================
+    function generateQuestionKey(q) {
+      return `${q.type}:${q.display}`;
+    }
+
+    function getQuestionStats(key) {
+      const userData = getCurrentUserData();
+      const history = userData.questionHistory[key] || { attempts: [], totalAsked: 0, totalCorrect: 0 };
+      const recentAttempts = history.attempts.slice(-20);
+      const recentCorrect = recentAttempts.filter(a => a).length;
+      const recentPercentage = recentAttempts.length > 0 ? (recentCorrect / recentAttempts.length) : 1;
+      return { ...history, recentPercentage, recentAttempts: recentAttempts.length };
+    }
+
+    function generateNumberBond5() {
+      const target = 5;
+      const a = Math.floor(Math.random() * 6);
+      const b = target - a;
+      const formats = [
+        { display: `${a} + ___ = ${target}`, answer: b, type: 'numberBonds5' },
+        { display: `${target} - ${a} = ___`, answer: b, type: 'numberBonds5' },
+        { display: `${target} - ___ = ${a}`, answer: b, type: 'numberBonds5' }
+      ];
+      return formats[Math.floor(Math.random() * formats.length)];
+    }
+
+    function generateNumberBond10() {
+      const target = 10;
+      const a = Math.floor(Math.random() * 11);
+      const b = target - a;
+      const formats = [
+        { display: `${a} + ___ = ${target}`, answer: b, type: 'numberBonds10' },
+        { display: `${target} - ${a} = ___`, answer: b, type: 'numberBonds10' },
+        { display: `${target} - ___ = ${a}`, answer: b, type: 'numberBonds10' }
+      ];
+      return formats[Math.floor(Math.random() * formats.length)];
+    }
+
+    function generateNumberBond100() {
+      const target = 100;
+      const a = Math.floor(Math.random() * 11) * 10;
+      const b = target - a;
+      const formats = [
+        { display: `${a} + ___ = ${target}`, answer: b, type: 'numberBonds100' },
+        { display: `${target} - ${a} = ___`, answer: b, type: 'numberBonds100' },
+        { display: `${target} - ___ = ${a}`, answer: b, type: 'numberBonds100' }
+      ];
+      return formats[Math.floor(Math.random() * formats.length)];
+    }
+
+    function generateAdditionSingle() {
+      const a = Math.floor(Math.random() * 10);
+      const b = Math.floor(Math.random() * 10);
+      return { display: `${a} + ${b} = ___`, answer: a + b, type: 'additionSingle' };
+    }
+
+    function generateAdditionDoubleNoCarry() {
+      let a, b;
+      do {
+        a = Math.floor(Math.random() * 80) + 10;
+        const maxB = 99 - a;
+        b = Math.floor(Math.random() * (maxB - 9)) + 10;
+        const onesA = a % 10;
+        const onesB = b % 10;
+        const tensA = Math.floor(a / 10);
+        const tensB = Math.floor(b / 10);
+        if (onesA + onesB < 10 && tensA + tensB < 10) break;
+      } while (true);
+      return { display: `${a} + ${b} = ___`, answer: a + b, type: 'additionDoubleNoCarry' };
+    }
+
+    function generateAdditionDoubleCarry() {
+      let a, b;
+      do {
+        a = Math.floor(Math.random() * 80) + 10;
+        const maxB = 99 - a;
+        b = Math.floor(Math.random() * (maxB - 9)) + 10;
+        const onesA = a % 10;
+        const onesB = b % 10;
+        const tensA = Math.floor(a / 10);
+        const tensB = Math.floor(b / 10);
+        if (onesA + onesB >= 10 || tensA + tensB >= 10) break;
+      } while (true);
+      return { display: `${a} + ${b} = ___`, answer: a + b, type: 'additionDoubleCarry' };
+    }
+
+    function generateSubtractionSingle() {
+      const a = Math.floor(Math.random() * 10);
+      const b = Math.floor(Math.random() * (a + 1));
+      return { display: `${a} - ${b} = ___`, answer: a - b, type: 'subtractionSingle' };
+    }
+
+    function generateSubtractionDoubleNoCarry() {
+      let a, b;
+      do {
+        a = Math.floor(Math.random() * 90) + 10;
+        b = Math.floor(Math.random() * a) + 1;
+        const onesA = a % 10;
+        const onesB = b % 10;
+        const tensA = Math.floor(a / 10);
+        const tensB = Math.floor(b / 10);
+        if (onesA >= onesB && tensA >= tensB && a - b >= 0) break;
+      } while (true);
+      return { display: `${a} - ${b} = ___`, answer: a - b, type: 'subtractionDoubleNoCarry' };
+    }
+
+    function generateSubtractionDoubleCarry() {
+      let a, b;
+      do {
+        a = Math.floor(Math.random() * 90) + 10;
+        b = Math.floor(Math.random() * a) + 1;
+        const onesA = a % 10;
+        const onesB = b % 10;
+        const tensA = Math.floor(a / 10);
+        const tensB = Math.floor(b / 10);
+        if ((onesA < onesB || tensA < tensB) && a - b >= 0) break;
+      } while (true);
+      return { display: `${a} - ${b} = ___`, answer: a - b, type: 'subtractionDoubleCarry' };
+    }
+
+    function generateMultiplication(table) {
+      const other = Math.floor(Math.random() * 12) + 1;
+      const flip = Math.random() > 0.5;
+      const [a, b] = flip ? [table, other] : [other, table];
+      return { display: `${a} × ${b} = ___`, answer: a * b, type: `multiplication${table}` };
+    }
+
+    function generateDivision(table) {
+      const other = Math.floor(Math.random() * 12) + 1;
+      const product = table * other;
+      return { display: `${product} ÷ ${table} = ___`, answer: other, type: `division${table}` };
+    }
+
+    function generateQuestions() {
+      const activeCategories = [];
+      if (state.categories.numberBonds5) activeCategories.push({ gen: generateNumberBond5, weight: 1 });
+      if (state.categories.numberBonds10) activeCategories.push({ gen: generateNumberBond10, weight: 1 });
+      if (state.categories.numberBonds100) activeCategories.push({ gen: generateNumberBond100, weight: 1 });
+      if (state.categories.additionSingle) activeCategories.push({ gen: generateAdditionSingle, weight: 1 });
+      if (state.categories.additionDoubleNoCarry) activeCategories.push({ gen: generateAdditionDoubleNoCarry, weight: 1 });
+      if (state.categories.additionDoubleCarry) activeCategories.push({ gen: generateAdditionDoubleCarry, weight: 1 });
+      if (state.categories.subtractionSingle) activeCategories.push({ gen: generateSubtractionSingle, weight: 1 });
+      if (state.categories.subtractionDoubleNoCarry) activeCategories.push({ gen: generateSubtractionDoubleNoCarry, weight: 1 });
+      if (state.categories.subtractionDoubleCarry) activeCategories.push({ gen: generateSubtractionDoubleCarry, weight: 1 });
+
+      state.categories.multiplication.forEach(table => {
+        activeCategories.push({ gen: () => generateMultiplication(table), weight: 1 });
+      });
+      state.categories.division.forEach(table => {
+        activeCategories.push({ gen: () => generateDivision(table), weight: 1 });
+      });
+
+      if (activeCategories.length === 0) {
+        alert('Please select at least one question type!');
+        return null;
+      }
+
+      const questions = [];
+      const questionPool = [];
+
+      for (let i = 0; i < 500; i++) {
+        const category = activeCategories[Math.floor(Math.random() * activeCategories.length)];
+        const q = category.gen();
+        const key = generateQuestionKey(q);
+        const stats = getQuestionStats(key);
+
+        let selectionWeight = 1;
+        if (stats.recentAttempts > 0) {
+          selectionWeight = 1 + (1 - stats.recentPercentage) * state.adaptiveWeight * 5;
+        }
+        questionPool.push({ ...q, key, selectionWeight });
+      }
+
+      for (let i = 0; i < 100; i++) {
+        const totalWeight = questionPool.reduce((sum, q) => sum + q.selectionWeight, 0);
+        let random = Math.random() * totalWeight;
+
+        for (let j = 0; j < questionPool.length; j++) {
+          random -= questionPool[j].selectionWeight;
+          if (random <= 0) {
+            questions.push({ ...questionPool[j], id: i });
+            questionPool.splice(j, 1);
+            break;
+          }
+        }
+        if (questionPool.length === 0) break;
+      }
+
+      return questions;
+    }
+
+    // =============================================================================
+    // GRADING
+    // =============================================================================
+    function handleGradeQuestion(questionId, isCorrect, isIncomplete = false) {
+      const question = state.currentWorksheet.find(q => q.id === questionId);
+      const key = question.key;
+      const userData = getCurrentUserData();
+      const newHistory = { ...userData.questionHistory };
+
+      if (!isIncomplete) {
+        if (!newHistory[key]) {
+          newHistory[key] = { attempts: [], totalAsked: 0, totalCorrect: 0 };
+        }
+        newHistory[key].attempts.push(isCorrect);
+        newHistory[key].totalAsked += 1;
+        if (isCorrect) newHistory[key].totalCorrect += 1;
+        saveUserData({ questionHistory: newHistory });
+      }
+
+      question.graded = true;
+      question.correct = isCorrect;
+      question.incomplete = isIncomplete;
+
+      if (state.currentWorksheet.every(q => q.graded)) {
+        const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+        if (userWorksheets[state.worksheetId]) {
+          userWorksheets[state.worksheetId].graded = true;
+          userWorksheets[state.worksheetId].questions = state.currentWorksheet;
+          saveWorksheets({ ...state.savedWorksheets, [state.currentUser]: userWorksheets });
+        }
+      }
+      render();
+    }
+
+    function handleQuickGrade() {
+      const parseNumbersWithRanges = (input) => {
+        const numbers = [];
+        const parts = input.split(',').map(p => p.trim());
+        parts.forEach(part => {
+          if (part.includes('-')) {
+            const [start, end] = part.split('-').map(n => parseInt(n.trim()));
+            if (!isNaN(start) && !isNaN(end) && start >= 1 && end <= 100 && start <= end) {
+              for (let i = start; i <= end; i++) numbers.push(i);
+            }
+          } else {
+            const num = parseInt(part);
+            if (!isNaN(num) && num >= 1 && num <= 100) numbers.push(num);
+          }
+        });
+        return numbers;
+      };
+
+      const wrongNumbers = parseNumbersWithRanges(state.quickGradeWrong);
+      const incompleteNumbers = parseNumbersWithRanges(state.quickGradeIncomplete);
+
+      if ((wrongNumbers.length === 0 && state.quickGradeWrong.trim() !== '') ||
+          (incompleteNumbers.length === 0 && state.quickGradeIncomplete.trim() !== '')) {
+        alert('Please enter question numbers separated by commas (e.g., 5,12,23)');
+        return;
+      }
+
+      const userData = getCurrentUserData();
+      const newHistory = { ...userData.questionHistory };
+
+      state.currentWorksheet.forEach((question) => {
+        const isIncomplete = incompleteNumbers.includes(question.id + 1);
+        const isWrong = wrongNumbers.includes(question.id + 1);
+        const isCorrect = !isWrong && !isIncomplete;
+        const key = question.key;
+
+        if (!isIncomplete) {
+          if (!newHistory[key]) {
+            newHistory[key] = { attempts: [], totalAsked: 0, totalCorrect: 0 };
+          }
+          newHistory[key].attempts.push(isCorrect);
+          newHistory[key].totalAsked += 1;
+          if (isCorrect) newHistory[key].totalCorrect += 1;
+        }
+
+        question.graded = true;
+        question.correct = isCorrect;
+        question.incomplete = isIncomplete;
+      });
+
+      saveUserData({ questionHistory: newHistory });
+      const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+      if (userWorksheets[state.worksheetId]) {
+        userWorksheets[state.worksheetId].graded = true;
+        userWorksheets[state.worksheetId].questions = state.currentWorksheet;
+        saveWorksheets({ ...state.savedWorksheets, [state.currentUser]: userWorksheets });
+      }
+      render();
+    }
+
+    function getUngradedWorksheets() {
+      const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+      return Object.values(userWorksheets).filter(w => !w.graded);
+    }
+
+    function getGradedWorksheets() {
+      const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+      const graded = Object.values(userWorksheets).filter(w => w.graded);
+      graded.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      return graded;
+    }
+
+    function deleteWorksheet(worksheetId) {
+      if (confirm(`Are you sure you want to delete worksheet ${worksheetId}?`)) {
+        const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+        delete userWorksheets[worksheetId];
+        saveWorksheets({ ...state.savedWorksheets, [state.currentUser]: userWorksheets });
+
+        if (worksheetId === state.selectedWorksheetToGrade) {
+          state.currentWorksheet = null;
+          state.worksheetId = null;
+          state.selectedWorksheetToGrade = '';
+        }
+        render();
+      }
+    }
+
+    function handleRegenerateWorksheet(sourceWorksheetId, targetUser) {
+      const sourceUserWorksheets = state.savedWorksheets[state.currentUser] || {};
+      const sourceWorksheet = sourceUserWorksheets[sourceWorksheetId];
+      if (!sourceWorksheet) return;
+
+      const newQuestions = sourceWorksheet.questions.map((q, idx) => ({
+        ...q,
+        id: idx,
+        graded: false,
+        correct: undefined,
+        incomplete: undefined
+      }));
+
+      const newId = `WS-${Date.now()}`;
+      const newWorksheet = {
+        id: newId,
+        questions: newQuestions,
+        user: targetUser,
+        createdAt: new Date().toISOString(),
+        graded: false,
+        regeneratedFrom: sourceWorksheetId
+      };
+
+      const targetUserWorksheets = state.savedWorksheets[targetUser] || {};
+      targetUserWorksheets[newId] = newWorksheet;
+      saveWorksheets({ ...state.savedWorksheets, [targetUser]: targetUserWorksheets });
+
+      state.currentUser = targetUser;
+      state.worksheetDisplayCount = 5;
+      state.currentWorksheet = newQuestions;
+      state.worksheetId = newId;
+      state.view = 'worksheet';
+      
+      // Load categories for new user
+      const savedCategories = localStorage.getItem(`categories-${targetUser}`);
+      if (savedCategories) {
+        state.categories = JSON.parse(savedCategories);
+      }
+      render();
+    }
+
+    // =============================================================================
+    // PROGRESS HELPERS
+    // =============================================================================
+    function getProgressBlocks(questionType) {
+      const userData = getCurrentUserData();
+      const questionHistory = userData.questionHistory || {};
+      
+      const allAttempts = [];
+      Object.keys(questionHistory).forEach(key => {
+        if (key.startsWith(`${questionType}:`)) {
+          const history = questionHistory[key];
+          if (history.attempts && Array.isArray(history.attempts)) {
+            allAttempts.push(...history.attempts);
+          }
+        }
+      });
+      
+      const blocks = [];
+      for (let i = 0; i < 8; i++) {
+        const start = Math.max(0, allAttempts.length - 50 * (i + 1));
+        const end = allAttempts.length - 50 * i;
+        if (start >= end) {
+          blocks.push(null);
+        } else {
+          const blockAttempts = allAttempts.slice(start, end);
+          const correct = blockAttempts.filter(a => a).length;
+          const percentage = Math.round((correct / blockAttempts.length) * 100);
+          blocks.push(percentage);
+        }
+      }
+      return blocks;
+    }
+
+    function getPercentageClass(percentage) {
+      if (percentage === null) return 'bg-gray-50 text-gray-400';
+      if (percentage >= 95) return 'bg-green-100 text-green-800';
+      if (percentage >= 75) return 'bg-yellow-100 text-yellow-800';
+      return 'bg-red-100 text-red-800';
+    }
+
+    function getCategoryData() {
+      const userData = getCurrentUserData();
+      const questionHistory = userData.questionHistory || {};
+      
+      const categories = [
+        {
+          name: 'Number Bonds',
+          types: [
+            { key: 'numberBonds5', label: 'to 5' },
+            { key: 'numberBonds10', label: 'to 10' },
+            { key: 'numberBonds100', label: 'to 100' }
+          ]
+        },
+        {
+          name: 'Addition',
+          types: [
+            { key: 'additionSingle', label: 'Single Digit' },
+            { key: 'additionDoubleNoCarry', label: 'Double Digit (no carry)' },
+            { key: 'additionDoubleCarry', label: 'Double Digit (carrying)' }
+          ]
+        },
+        {
+          name: 'Subtraction',
+          types: [
+            { key: 'subtractionSingle', label: 'Single Digit' },
+            { key: 'subtractionDoubleNoCarry', label: 'Double Digit (no borrowing)' },
+            { key: 'subtractionDoubleCarry', label: 'Double Digit (borrowing)' }
+          ]
+        },
+        {
+          name: 'Multiplication',
+          types: Array.from({ length: 12 }, (_, i) => ({
+            key: `multiplication${i + 1}`,
+            label: `Times ${i + 1}`
+          }))
+        },
+        {
+          name: 'Division',
+          types: Array.from({ length: 12 }, (_, i) => ({
+            key: `division${i + 1}`,
+            label: `Divide by ${i + 1}`
+          }))
+        }
+      ].map(category => {
+        const typesWithData = category.types
+          .map(type => {
+            let total = 0;
+            Object.keys(questionHistory).forEach(key => {
+              if (key.startsWith(`${type.key}:`)) {
+                const history = questionHistory[key];
+                total += history.attempts?.length || 0;
+              }
+            });
+            return { ...type, total, blocks: getProgressBlocks(type.key) };
+          })
+          .filter(type => type.total > 0);
+        
+        const categoryTotal = typesWithData.reduce((sum, type) => sum + type.total, 0);
+        
+        let overallPercentage = null;
+        if (categoryTotal > 0) {
+          const totalCorrect = typesWithData.reduce((sum, type) => {
+            let correct = 0;
+            Object.keys(questionHistory).forEach(key => {
+              if (key.startsWith(`${type.key}:`)) {
+                const history = questionHistory[key];
+                correct += history.attempts?.filter(a => a).length || 0;
+              }
+            });
+            return sum + correct;
+          }, 0);
+          overallPercentage = Math.round((totalCorrect / categoryTotal) * 100);
+        }
+        
+        return { ...category, types: typesWithData, total: categoryTotal, overallPercentage };
+      }).filter(category => category.total > 0);
+      
+      return categories;
+    }
+
+    // =============================================================================
+    // USER MANAGEMENT
+    // =============================================================================
+    function addUser() {
+      if (state.newUserName.trim() && !state.users.includes(state.newUserName.trim())) {
+        const updatedUsers = [...state.users, state.newUserName.trim()];
+        saveUsers(updatedUsers);
+        state.currentUser = state.newUserName.trim();
+        state.worksheetDisplayCount = 5;
+        state.newUserName = '';
+        state.showUserModal = false;
+        render();
+      } else {
+        alert('Please enter a unique name');
+      }
+    }
+
+    function deleteUser(userName) {
+      if (state.users.length === 1) {
+        alert('Cannot delete the last user');
+        return;
+      }
+      if (confirm(`Are you sure you want to delete ${userName} and all their data?`)) {
+        const updatedUsers = state.users.filter(u => u !== userName);
+        saveUsers(updatedUsers);
+
+        delete state.allUserData[userName];
+        const compressed = compressForStorage({
+          users: state.users,
+          allUserData: state.allUserData,
+          savedWorksheets: state.savedWorksheets
+        });
+        localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+
+        delete state.savedWorksheets[userName];
+        saveWorksheets(state.savedWorksheets);
+
+        if (state.currentUser === userName) {
+          state.currentUser = updatedUsers[0];
+        }
+        render();
+      }
+    }
+
+    // =============================================================================
+    // BACKUP / RESTORE
+    // =============================================================================
+    function handleExport() {
+      const compressed = compressForStorage({
+        users: state.users,
+        allUserData: state.allUserData,
+        savedWorksheets: state.savedWorksheets
+      });
+      compressed.exportedAt = new Date().toISOString();
+      
+      const dataStr = JSON.stringify(compressed, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `math-practice-backup-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+      alert('Backup exported successfully!');
+    }
+
+    function handleImport(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const rawData = JSON.parse(e.target.result);
+          
+          if (rawData.v !== 2) {
+            alert('Invalid backup file format. Please use an optimized backup file.');
+            return;
+          }
+          
+          const importData = decompressFromStorage(rawData);
+          
+          if (!importData.users || !importData.allUserData || !importData.savedWorksheets) {
+            alert('Invalid backup file format');
+            return;
+          }
+
+          if (confirm('This will replace all current data with the backup. Are you sure?')) {
+            state.users = importData.users;
+            state.allUserData = importData.allUserData;
+            state.savedWorksheets = importData.savedWorksheets;
+            
+            const compressed = compressForStorage(importData);
+            localStorage.setItem('mathPracticeUsers', JSON.stringify(importData.users));
+            localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+            localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
+              v: 2,
+              sw: compressed.sw,
+              qd: compressed.qd
+            }));
+            
+            alert('Data imported successfully!');
+            state.showBackupModal = false;
+            
+            if (!importData.users.includes(state.currentUser)) {
+              state.currentUser = importData.users[0];
+            }
+            render();
+          }
+        } catch (err) {
+          alert('Error reading backup file: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+      event.target.value = '';
+    }
+
+    // =============================================================================
+    // HELPERS
+    // =============================================================================
+    function formatShortDate(isoDate) {
+      if (!isoDate) return '';
+      const d = new Date(isoDate);
+      return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    }
+
+    function getTotalQuestionsAnswered() {
+      const userData = getCurrentUserData();
+      const questionHistory = userData.questionHistory || {};
+      return Object.values(questionHistory).reduce((sum, history) => sum + (history.totalAsked || 0), 0);
+    }
+
+    // =============================================================================
+    // RENDER FUNCTIONS
+    // =============================================================================
+    function renderSetupView() {
+      return `
+        <div class="max-w-6xl mx-auto p-6">
+          <div class="bg-white rounded-lg shadow-lg p-8">
+            <div class="mb-6">
+              <h1 class="text-3xl font-bold text-gray-800">Basic Math Facts Worksheet Generator</h1>
+            </div>
+
+            <div class="mb-6 p-4 bg-blue-50 border border-blue-300 rounded">
+              <div class="flex items-center space-x-4">
+                <label class="font-semibold">Current User:</label>
+                <select
+                  id="userSelect"
+                  class="border border-gray-300 rounded px-3 py-2 flex-1"
+                >
+                  ${state.users.map(user => `<option value="${user}" ${user === state.currentUser ? 'selected' : ''}>${user}</option>`).join('')}
+                </select>
+                <button
+                  onclick="state.showUserModal = true; render();"
+                  class="bg-green-600 text-white px-4 py-2 rounded font-semibold hover:bg-green-700"
+                >
+                  ➕ Add User
+                </button>
+                <button
+                  onclick="state.editingUsers = true; render();"
+                  class="bg-gray-600 text-white px-4 py-2 rounded font-semibold hover:bg-gray-700"
+                >
+                  ✏️ Edit Users
+                </button>
+              </div>
+            </div>
+
+            <div class="mb-6 p-4 bg-gray-100 border border-gray-300 rounded">
+              <div class="text-lg">
+                <strong>Total Questions Answered:</strong> ${getTotalQuestionsAnswered()}
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-4 justify-center">
+              <button
+                onclick="state.view = 'worksheetSettings'; render();"
+                class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700"
+              >
+                📄 Create Worksheet
+              </button>
+
+              <button
+                onclick="state.view = 'grading'; render();"
+                class="bg-purple-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-purple-700"
+              >
+                ✓ Grade Worksheet
+              </button>
+
+              <button
+                onclick="state.view = 'progress'; render();"
+                class="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700"
+              >
+                📊 View Progress
+              </button>
+
+              <button
+                onclick="state.showBackupModal = true; render();"
+                class="bg-yellow-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-yellow-700"
+              >
+                💾 Backup & Restore
+              </button>
+            </div>
+          </div>
+
+          ${state.showUserModal ? renderUserModal() : ''}
+          ${state.editingUsers ? renderEditUsersModal() : ''}
+          ${state.showBackupModal ? renderBackupModal() : ''}
+        </div>
+      `;
+    }
+
+    function renderUserModal() {
+      return `
+        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg p-6 max-w-md w-full">
+            <h2 class="text-xl font-bold mb-4">Add New User</h2>
+            <input
+              type="text"
+              id="newUserInput"
+              value="${state.newUserName}"
+              placeholder="Enter name"
+              class="border border-gray-300 rounded px-3 py-2 w-full mb-4"
+            />
+            <div class="flex space-x-3">
+              <button
+                onclick="state.newUserName = document.getElementById('newUserInput').value; addUser();"
+                class="flex-1 bg-green-600 text-white px-4 py-2 rounded font-semibold hover:bg-green-700"
+              >
+                Add
+              </button>
+              <button
+                onclick="state.showUserModal = false; state.newUserName = ''; render();"
+                class="flex-1 bg-gray-600 text-white px-4 py-2 rounded font-semibold hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderEditUsersModal() {
+      return `
+        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg p-6 max-w-md w-full">
+            <h2 class="text-xl font-bold mb-4">Edit Users</h2>
+            <div class="space-y-2 mb-4">
+              ${state.users.map(userName => `
+                <div class="flex items-center justify-between p-2 bg-gray-50 rounded">
+                  <span>${userName}</span>
+                  <button
+                    onclick="deleteUser('${userName}')"
+                    class="bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700"
+                  >
+                    Delete
+                  </button>
+                </div>
+              `).join('')}
+            </div>
+            <button
+              onclick="state.editingUsers = false; render();"
+              class="w-full bg-gray-600 text-white px-4 py-2 rounded font-semibold hover:bg-gray-700"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBackupModal() {
+      return `
+        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg p-6 max-w-md w-full">
+            <h2 class="text-xl font-bold mb-4">Backup & Restore</h2>
+            
+            <div class="space-y-4">
+              <div>
+                <h3 class="font-semibold mb-2">Export Backup</h3>
+                <p class="text-sm text-gray-600 mb-3">
+                  Download all your data as a backup file
+                </p>
+                <button
+                  onclick="handleExport()"
+                  class="w-full bg-blue-600 text-white px-4 py-2 rounded font-semibold hover:bg-blue-700"
+                >
+                  ⬇️ Export Data
+                </button>
+              </div>
+              
+              <div class="border-t pt-4">
+                <h3 class="font-semibold mb-2">Import Backup</h3>
+                <p class="text-sm text-gray-600 mb-3">
+                  Restore data from a backup file (this will replace all current data)
+                </p>
+                <input
+                  type="file"
+                  accept=".json"
+                  onchange="handleImport(event)"
+                  class="w-full text-sm"
+                />
+              </div>
+            </div>
+            
+            <button
+              onclick="state.showBackupModal = false; render();"
+              class="w-full mt-6 bg-gray-600 text-white px-4 py-2 rounded font-semibold hover:bg-gray-700"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderWorksheetSettingsView() {
+      return `
+        <div class="max-w-4xl mx-auto p-6">
+          <div class="bg-white rounded-lg shadow-lg p-8">
+            <h1 class="text-3xl font-bold mb-6 text-gray-800">Create Worksheet for ${state.currentUser}</h1>
+
+            <div class="mb-8">
+              <h2 class="text-xl font-semibold mb-4 text-gray-700">Select Question Types</h2>
+
+              <div class="mb-6">
+                <h3 class="font-semibold mb-3 text-gray-600">Number Bonds</h3>
+                <div class="grid grid-cols-3 gap-4">
+                  ${[
+                    { key: 'numberBonds5', label: 'Number Bonds to 5' },
+                    { key: 'numberBonds10', label: 'Number Bonds to 10' },
+                    { key: 'numberBonds100', label: 'Number Bonds to 100' }
+                  ].map(item => `
+                    <label class="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        ${state.categories[item.key] ? 'checked' : ''}
+                        onchange="state.categories.${item.key} = this.checked; render();"
+                        class="w-5 h-5"
+                      />
+                      <span>${item.label}</span>
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="mb-6">
+                <h3 class="font-semibold mb-3 text-gray-600">Addition / Subtraction</h3>
+                <div class="space-y-3">
+                  <div class="grid grid-cols-3 gap-4">
+                    ${[
+                      { key: 'additionSingle', label: 'Addition Single Digit' },
+                      { key: 'additionDoubleNoCarry', label: 'Addition Double Digit (no carrying)' },
+                      { key: 'additionDoubleCarry', label: 'Addition Double Digit (carrying)' }
+                    ].map(item => `
+                      <label class="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          ${state.categories[item.key] ? 'checked' : ''}
+                          onchange="state.categories.${item.key} = this.checked; render();"
+                          class="w-5 h-5"
+                        />
+                        <span>${item.label}</span>
+                      </label>
+                    `).join('')}
+                  </div>
+
+                  <div class="grid grid-cols-3 gap-4">
+                    ${[
+                      { key: 'subtractionSingle', label: 'Subtraction Single Digit' },
+                      { key: 'subtractionDoubleNoCarry', label: 'Subtraction Double Digit (no borrowing)' },
+                      { key: 'subtractionDoubleCarry', label: 'Subtraction Double Digit (borrowing)' }
+                    ].map(item => `
+                      <label class="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          ${state.categories[item.key] ? 'checked' : ''}
+                          onchange="state.categories.${item.key} = this.checked; render();"
+                          class="w-5 h-5"
+                        />
+                        <span>${item.label}</span>
+                      </label>
+                    `).join('')}
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-6">
+                <h3 class="font-semibold mb-2">Multiplication Tables</h3>
+                <div class="grid grid-cols-6 gap-2">
+                  ${[1,2,3,4,5,6,7,8,9,10,11,12].map(n => `
+                    <label class="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        ${state.categories.multiplication.includes(n) ? 'checked' : ''}
+                        onchange="toggleMultiplication(${n}, this.checked)"
+                        class="w-4 h-4"
+                      />
+                      <span>${n}×</span>
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="mt-6">
+                <h3 class="font-semibold mb-2">Division Tables</h3>
+                <div class="grid grid-cols-6 gap-2">
+                  ${[1,2,3,4,5,6,7,8,9,10,11,12].map(n => `
+                    <label class="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        ${state.categories.division.includes(n) ? 'checked' : ''}
+                        onchange="toggleDivision(${n}, this.checked)"
+                        class="w-4 h-4"
+                      />
+                      <span>÷${n}</span>
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+            </div>
+
+            <div class="mb-8 flex justify-start space-x-4">
+              <button
+                onclick="selectAll()"
+                class="bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-700"
+              >
+                ✓ Select All
+              </button>
+              <button
+                onclick="selectNone()"
+                class="bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-gray-700"
+              >
+                ✗ Select None
+              </button>
+            </div>
+
+            <div class="mb-8">
+              <h2 class="text-xl font-semibold mb-4 text-gray-700">Adaptive Learning Weight</h2>
+              <div class="flex items-center space-x-4">
+                <span class="text-sm">Random</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value="${state.adaptiveWeight}"
+                  oninput="state.adaptiveWeight = parseFloat(this.value); document.getElementById('weightDisplay').textContent = state.adaptiveWeight.toFixed(1);"
+                  class="flex-1"
+                />
+                <span class="text-sm">Focus Struggles</span>
+              </div>
+              <p class="text-sm text-gray-600 mt-2">Current: <span id="weightDisplay">${state.adaptiveWeight.toFixed(1)}</span></p>
+            </div>
+
+            <div class="flex space-x-4">
+              <button
+                onclick="createWorksheet()"
+                class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700"
+              >
+                📄 Create Worksheet
+              </button>
+
+              <button
+                onclick="state.view = 'setup'; render();"
+                class="bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-700"
+              >
+                ← Back
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderWorksheetView() {
+      const columns = [[], [], [], []];
+      state.currentWorksheet.forEach((q, idx) => {
+        const col = Math.floor(idx / 25);
+        columns[col].push({ ...q, displayNum: idx + 1 });
+      });
+
+      return `
+        <div id="printable" class="p-8 bg-white" style="width: 210mm; min-height: 297mm; margin: 0 auto;">
+          <div class="mb-6 border-b-2 border-gray-300 pb-4">
+            <h1 class="text-4xl font-bold text-center mb-4">Math Practice</h1>
+            <div class="flex justify-between text-sm mb-2">
+              <div>Name: <span class="font-semibold">${state.currentUser}</span></div>
+              <div class="font-bold text-lg">ID: ${state.worksheetId}</div>
+            </div>
+            <div class="flex justify-between text-sm">
+              <div>Date: _________________________</div>
+              <div>Time Taken: _________ minutes</div>
+            </div>
+            <div class="text-right text-sm mt-1">
+              <div>Score: _____ / 100</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-4 gap-x-6 text-sm">
+            ${columns.map(column => `
+              <div class="space-y-3">
+                ${column.map(q => `
+                  <div class="flex items-center space-x-2">
+                    <span class="text-gray-500 w-7">${q.displayNum}.</span>
+                    <span class="font-mono">${q.display}</span>
+                  </div>
+                `).join('')}
+              </div>
+            `).join('')}
+          </div>
+
+          <div class="mt-6 text-sm text-gray-600 border-t border-gray-300 pt-2">
+            <strong>Question Types:</strong> ${Array.from(new Set(state.currentWorksheet.map(q => q.type))).join(', ')}
+          </div>
+
+          <div class="mt-8 flex justify-center space-x-4 print:hidden">
+            <button
+              onclick="window.print()"
+              class="bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-700"
+            >
+              🖨️ Print Worksheet
+            </button>
+
+            <button
+              onclick="state.view = 'setup'; render();"
+              class="bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-gray-700"
+            >
+              ← Back to Start
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderGradingView() {
+      const ungradedWorksheets = getUngradedWorksheets();
+      
+      let gradingContent = '';
+      if (state.currentWorksheet) {
+        const columns = [[], [], [], []];
+        state.currentWorksheet.forEach((q, idx) => {
+          const col = Math.floor(idx / 25);
+          columns[col].push({ ...q, displayNum: idx + 1 });
+        });
+
+        const allGraded = state.currentWorksheet.every(q => q.graded);
+        const score = state.currentWorksheet.filter(q => q.correct).length;
+
+        gradingContent = `
+          ${allGraded ? `
+            <div class="mb-6 p-4 bg-green-100 border border-green-400 rounded">
+              <p class="font-semibold text-green-800">
+                All questions graded! Score: ${score}/100
+              </p>
+            </div>
+          ` : `
+            <div class="mb-6 p-4 bg-blue-50 border border-blue-300 rounded">
+              <h3 class="font-semibold mb-2">Quick Grade Mode</h3>
+              <p class="text-sm text-gray-700 mb-3">Enter question numbers (e.g., 5,12,23 or 90-100)</p>
+              <div class="space-y-3">
+                <div class="flex items-center space-x-3">
+                  <label class="w-32 font-semibold">Wrong:</label>
+                  <input
+                    type="text"
+                    id="quickGradeWrong"
+                    value="${state.quickGradeWrong}"
+                    placeholder="e.g., 5,12,23,90-100"
+                    class="flex-1 border border-gray-300 rounded px-3 py-2"
+                  />
+                </div>
+                <div class="flex items-center space-x-3">
+                  <label class="w-32 font-semibold">Incomplete:</label>
+                  <input
+                    type="text"
+                    id="quickGradeIncomplete"
+                    value="${state.quickGradeIncomplete}"
+                    placeholder="e.g., 89,95-100"
+                    class="flex-1 border border-gray-300 rounded px-3 py-2"
+                  />
+                </div>
+                <button
+                  onclick="state.quickGradeWrong = document.getElementById('quickGradeWrong').value; state.quickGradeIncomplete = document.getElementById('quickGradeIncomplete').value; handleQuickGrade();"
+                  class="w-full bg-green-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-green-700"
+                >
+                  Grade All
+                </button>
+              </div>
+            </div>
+          `}
+          <h3 class="font-semibold mb-3">Or grade individually:</h3>
+          <div class="grid grid-cols-4 gap-6 mb-6">
+            ${columns.map(column => `
+              <div class="space-y-3">
+                ${column.map(q => `
+                  <div class="p-3 border rounded ${
+                    q.graded ? (
+                      q.incomplete ? 'bg-gray-50 border-gray-300' :
+                      q.correct ? 'bg-green-50 border-green-300' : 'bg-red-50 border-red-300'
+                    ) : 'border-gray-300'
+                  }">
+                    <div class="text-sm font-mono mb-2">${q.displayNum}. ${q.display}</div>
+                    <div class="text-xs text-gray-600 mb-2">Answer: ${q.answer}</div>
+                    ${!q.graded ? `
+                      <div class="flex space-x-1">
+                        <button
+                          onclick="handleGradeQuestion(${q.id}, true, false)"
+                          class="flex-1 bg-green-500 text-white px-2 py-1 rounded text-xs hover:bg-green-600"
+                          title="Correct"
+                        >
+                          ✓
+                        </button>
+                        <button
+                          onclick="handleGradeQuestion(${q.id}, false, false)"
+                          class="flex-1 bg-red-500 text-white px-2 py-1 rounded text-xs hover:bg-red-600"
+                          title="Wrong"
+                        >
+                          ✗
+                        </button>
+                        <button
+                          onclick="handleGradeQuestion(${q.id}, false, true)"
+                          class="flex-1 bg-gray-400 text-white px-2 py-1 rounded text-xs hover:bg-gray-500"
+                          title="Incomplete"
+                        >
+                          •
+                        </button>
+                      </div>
+                    ` : `
+                      <div class="text-center font-semibold text-xs">
+                        ${q.incomplete ? '• Incomplete' : q.correct ? '✓ Correct' : '✗ Wrong'}
+                      </div>
+                    `}
+                  </div>
+                `).join('')}
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+
+      return `
+        <div class="max-w-6xl mx-auto p-6">
+          <div class="bg-white rounded-lg shadow-lg p-8">
+            <h1 class="text-2xl font-bold mb-6">Grade Worksheet</h1>
+
+            <div class="mb-6 p-4 bg-blue-50 border border-blue-300 rounded">
+              <h3 class="font-semibold mb-3">Select Worksheet to Grade</h3>
+              <div class="flex items-center space-x-3">
+                <select
+                  id="worksheetSelect"
+                  class="border border-gray-300 rounded px-3 py-2 flex-1"
+                >
+                  <option value="">-- Select a worksheet --</option>
+                  ${ungradedWorksheets.map(ws => `
+                    <option value="${ws.id}" ${ws.id === state.selectedWorksheetToGrade ? 'selected' : ''}>
+                      ${ws.id} (Created: ${new Date(ws.createdAt).toLocaleDateString()})
+                    </option>
+                  `).join('')}
+                </select>
+                ${state.selectedWorksheetToGrade ? `
+                  <button
+                    onclick="deleteWorksheet('${state.selectedWorksheetToGrade}')"
+                    class="bg-red-600 text-white px-4 py-2 rounded font-semibold hover:bg-red-700"
+                  >
+                    🗑️ Delete
+                  </button>
+                ` : ''}
+              </div>
+              ${ungradedWorksheets.length === 0 ? '<p class="text-sm text-gray-600 mt-2">No ungraded worksheets found.</p>' : ''}
+            </div>
+
+            <button
+              onclick="state.currentWorksheet = null; state.worksheetId = null; state.selectedWorksheetToGrade = ''; state.view = 'setup'; render();"
+              class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 mb-6"
+            >
+              ← Back to Start
+            </button>
+
+            ${gradingContent}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderProgressView() {
+      const categoryData = getCategoryData();
+      const gradedWorksheets = getGradedWorksheets();
+
+      const typeOrder = [
+        'numberBonds5', 'numberBonds10', 'numberBonds100',
+        'additionSingle', 'additionDoubleNoCarry', 'additionDoubleCarry',
+        'subtractionSingle', 'subtractionDoubleNoCarry', 'subtractionDoubleCarry',
+        ...Array.from({length: 12}, (_, i) => `multiplication${i + 1}`),
+        ...Array.from({length: 12}, (_, i) => `division${i + 1}`)
+      ];
+
+      return `
+        <div class="max-w-6xl mx-auto p-6">
+          <div class="bg-white rounded-lg shadow-lg p-8">
+            <h1 class="text-2xl font-bold mb-6">Progress Report - ${state.currentUser}</h1>
+            
+            <button
+              onclick="state.view = 'setup'; render();"
+              class="bg-blue-600 text-white px-4 py-2 rounded font-semibold hover:bg-blue-700 mb-4"
+            >
+              ← Back to Start
+            </button>
+
+            <!-- Progress by Question Type -->
+            <div class="mb-8">
+              <h2 class="text-xl font-semibold mb-4">Progress by Question Type</h2>
+              <p class="text-sm text-gray-600 mb-4">
+                This table shows the most recent 400 questions for each question type. 
+                The leftmost column shows your most recent 50 questions, and columns move backwards in time from there.
+              </p>
+              
+              ${categoryData.length === 0 ? `
+                <div class="p-6 bg-gray-50 border border-gray-300 rounded text-center">
+                  <p class="text-gray-600">No question history yet. Complete some worksheets to see your progress!</p>
+                </div>
+              ` : `
+                <div class="overflow-x-auto">
+                  <table class="w-full text-sm border-collapse">
+                    <thead>
+                      <tr class="border-b-2 border-gray-300 bg-gray-50">
+                        <th class="text-left py-3 px-4 font-semibold">Question Type</th>
+                        <th class="text-center py-3 px-2 font-semibold w-20">Total</th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Most Recent</div>
+                          <div class="text-xs font-normal text-gray-600">(Last 50 Qs)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(51-100)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(101-150)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(151-200)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(201-250)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(251-300)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(301-350)</div>
+                        </th>
+                        <th class="text-center py-3 px-2 font-semibold w-24">
+                          <div>Previous</div>
+                          <div class="text-xs font-semibold text-gray-600">(351-400)</div>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${categoryData.map(category => `
+                        <tr
+                          onclick="toggleCategory('${category.name}')"
+                          class="border-b border-gray-200 bg-gray-50 hover:bg-gray-100 cursor-pointer font-semibold"
+                        >
+                          <td class="py-3 px-4">
+                            <div class="flex items-center gap-2">
+                              <span class="text-xs text-gray-500 transition-transform" style="transform: ${state.expandedCategories[category.name] ? 'rotate(90deg)' : 'rotate(0deg)'}">
+                                ▶
+                              </span>
+                              <span>${category.name}</span>
+                            </div>
+                          </td>
+                          <td class="text-center py-3 px-2">${category.total}</td>
+                          <td colspan="8" class="text-center py-3 px-2 font-semibold ${getPercentageClass(category.overallPercentage)}">
+                            ${category.overallPercentage !== null ? `${category.overallPercentage}% overall` : '-'}
+                          </td>
+                        </tr>
+                        ${state.expandedCategories[category.name] ? category.types.map(type => `
+                          <tr class="border-b border-gray-200">
+                            <td class="py-3 px-4 pl-12 text-gray-700">${type.label}</td>
+                            <td class="text-center py-3 px-2">${type.total}</td>
+                            ${type.blocks.map(block => `
+                              <td class="text-center py-3 px-2 font-semibold ${getPercentageClass(block)}">
+                                ${block !== null ? `${block}%` : '-'}
+                              </td>
+                            `).join('')}
+                          </tr>
+                        `).join('') : ''}
+                      `).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              `}
+            </div>
+
+            <h2 class="text-xl font-semibold mb-4">Previous Worksheet Results</h2>
+
+            ${gradedWorksheets.length === 0 ? `
+              <div class="p-6 bg-gray-50 border border-gray-300 rounded text-center">
+                <p class="text-gray-600">No graded worksheets yet.</p>
+              </div>
+            ` : `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b-2 border-gray-300">
+                      <th class="text-center py-2 w-20">Date</th>
+                      <th class="text-center py-2 w-20">Score</th>
+                      <th class="text-left py-2 w-36">Worksheet ID</th>
+                      <th class="text-left py-2 w-66">Question Types</th>
+                      <th class="text-center py-2 w-20">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${gradedWorksheets.slice(0, state.worksheetDisplayCount).map(ws => {
+                      const totalQs = ws.questions?.length || 0;
+                      const correct = ws.questions?.filter(q => q.correct).length || 0;
+                      const percent = totalQs > 0 ? Math.round((correct / totalQs) * 100) : 0;
+                      
+                      const types = Array.from(new Set((ws.questions || []).map(q => q.type)))
+                        .sort((a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b))
+                        .join(', ');
+                      
+                      return `
+                        <tr class="border-b border-gray-200">
+                          <td class="py-2 text-center">${formatShortDate(ws.createdAt)}</td>
+                          <td class="py-2 text-center">
+                            <span class="font-semibold ${
+                              percent >= 80 ? 'text-green-600' :
+                              percent >= 60 ? 'text-yellow-600' : 'text-red-600'
+                            }">
+                              ${percent}%
+                            </span>
+                          </td>
+                          <td class="py-2 font-mono">${ws.id}</td>
+                          <td class="py-2 text-xs">${types}</td>
+                          <td class="py-2 text-center">
+                            <select
+                              onchange="if(this.value) { handleRegenerateWorksheet('${ws.id}', this.value); this.value = ''; }"
+                              class="text-xs border border-gray-300 rounded px-2 py-1"
+                            >
+                              <option value="">Copy to...</option>
+                              <option value="${state.currentUser}">📋 ${state.currentUser} (me)</option>
+                              ${state.users.filter(u => u !== state.currentUser).map(user => `
+                                <option value="${user}">👤 ${user}</option>
+                              `).join('')}
+                            </select>
+                          </td>
+                        </tr>
+                      `;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>
+              ${gradedWorksheets.length > state.worksheetDisplayCount ? `
+                <div class="flex justify-center">
+                  <button
+                    onclick="state.worksheetDisplayCount += 10; render();"
+                    class="mt-4 bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-gray-700"
+                  >
+                    Load More Results
+                  </button>
+                </div>
+              ` : ''}
+            `}
+          </div>
+        </div>
+      `;
+    }
+
+    // =============================================================================
+    // HELPER FUNCTIONS FOR EVENT HANDLERS
+    // =============================================================================
+    function toggleMultiplication(n, checked) {
+      if (checked) {
+        if (!state.categories.multiplication.includes(n)) {
+          state.categories.multiplication.push(n);
+        }
+      } else {
+        state.categories.multiplication = state.categories.multiplication.filter(x => x !== n);
+      }
+      render();
+    }
+
+    function toggleDivision(n, checked) {
+      if (checked) {
+        if (!state.categories.division.includes(n)) {
+          state.categories.division.push(n);
+        }
+      } else {
+        state.categories.division = state.categories.division.filter(x => x !== n);
+      }
+      render();
+    }
+
+    function selectAll() {
+      state.categories = {
+        numberBonds5: true, numberBonds10: true, numberBonds100: true,
+        additionSingle: true, additionDoubleNoCarry: true, additionDoubleCarry: true,
+        subtractionSingle: true, subtractionDoubleNoCarry: true, subtractionDoubleCarry: true,
+        multiplication: [1,2,3,4,5,6,7,8,9,10,11,12],
+        division: [1,2,3,4,5,6,7,8,9,10,11,12]
+      };
+      render();
+    }
+
+    function selectNone() {
+      state.categories = {
+        numberBonds5: false, numberBonds10: false, numberBonds100: false,
+        additionSingle: false, additionDoubleNoCarry: false, additionDoubleCarry: false,
+        subtractionSingle: false, subtractionDoubleNoCarry: false, subtractionDoubleCarry: false,
+        multiplication: [], division: []
+      };
+      render();
+    }
+
+    function createWorksheet() {
+      const questions = generateQuestions();
+      if (questions) {
+        localStorage.setItem(`categories-${state.currentUser}`, JSON.stringify(state.categories));
+        const id = `WS-${Date.now()}`;
+        const worksheet = {
+          id: id,
+          questions: questions,
+          user: state.currentUser,
+          createdAt: new Date().toISOString(),
+          graded: false
+        };
+        const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+        userWorksheets[id] = worksheet;
+        saveWorksheets({ ...state.savedWorksheets, [state.currentUser]: userWorksheets });
+        
+        state.currentWorksheet = questions;
+        state.worksheetId = id;
+        state.view = 'worksheet';
+        render();
+      }
+    }
+
+    function toggleCategory(categoryName) {
+      state.expandedCategories[categoryName] = !state.expandedCategories[categoryName];
+      render();
+    }
+
+    // =============================================================================
+    // MAIN RENDER
+    // =============================================================================
+    function render() {
+      const app = document.getElementById('app');
+      
+      let content = '';
+      switch (state.view) {
+        case 'setup':
+          content = renderSetupView();
+          break;
+        case 'worksheetSettings':
+          content = renderWorksheetSettingsView();
+          break;
+        case 'worksheet':
+          content = renderWorksheetView();
+          break;
+        case 'grading':
+          content = renderGradingView();
+          break;
+        case 'progress':
+          content = renderProgressView();
+          break;
+        default:
+          content = renderSetupView();
+      }
+      
+      app.innerHTML = content;
+
+      // Attach event listeners after render
+      const userSelect = document.getElementById('userSelect');
+      if (userSelect) {
+        userSelect.addEventListener('change', (e) => {
+          state.currentUser = e.target.value;
+          state.worksheetDisplayCount = 5;
+          // Load categories for new user
+          const savedCategories = localStorage.getItem(`categories-${state.currentUser}`);
+          if (savedCategories) {
+            state.categories = JSON.parse(savedCategories);
+          }
+          render();
+        });
+      }
+
+      const worksheetSelect = document.getElementById('worksheetSelect');
+      if (worksheetSelect) {
+        worksheetSelect.addEventListener('change', (e) => {
+          state.gradingHistory = [];
+          const wsId = e.target.value;
+          if (!wsId) {
+            state.currentWorksheet = null;
+            state.worksheetId = null;
+            state.selectedWorksheetToGrade = '';
+            render();
+            return;
+          }
+          const userWorksheets = state.savedWorksheets[state.currentUser] || {};
+          const worksheet = userWorksheets[wsId];
+          if (worksheet) {
+            state.currentWorksheet = worksheet.questions;
+            state.worksheetId = wsId;
+            state.selectedWorksheetToGrade = wsId;
+            state.quickGradeWrong = '';
+            state.quickGradeIncomplete = '';
+          }
+          render();
+        });
+      }
+
+      // Handle Enter key in new user input
+      const newUserInput = document.getElementById('newUserInput');
+      if (newUserInput) {
+        newUserInput.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') {
+            state.newUserName = newUserInput.value;
+            addUser();
+          }
+        });
+      }
+    }
+
+    // =============================================================================
+    // INITIALIZATION
+    // =============================================================================
+    loadFromStorage();
+    render();
+  </script>
+</body>
+</html>
