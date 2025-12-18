@@ -1,9 +1,8 @@
 // Docs: https://www.instantdb.com/docs/permissions
-
 import type { InstantRules } from "@instantdb/react";
 
 const rules = {
-  snapshots: {
+  userData: {
     allow: {
       view: "auth.id == data.id",
       create: "auth.id == data.id",
