@@ -218,6 +218,79 @@
     }
 
     // =============================================================================
+    // STORAGE DIAGNOSTICS (helps identify persistence issues)
+    // =============================================================================
+    function checkStorageStatus() {
+      const diagnostics = {
+        isPrivateMode: false,
+        isFileProtocol: window.location.protocol === 'file:',
+        storageAvailable: false,
+        testWriteRead: false
+      };
+      
+      // Test localStorage availability and persistence
+      try {
+        const testKey = '__storage_test__';
+        localStorage.setItem(testKey, 'test');
+        const retrieved = localStorage.getItem(testKey);
+        localStorage.removeItem(testKey);
+        diagnostics.storageAvailable = true;
+        diagnostics.testWriteRead = retrieved === 'test';
+      } catch (e) {
+        diagnostics.storageAvailable = false;
+      }
+      
+      // Check for private mode (Safari/Firefox quirk)
+      try {
+        localStorage.setItem('__pm_test__', '1');
+        localStorage.removeItem('__pm_test__');
+      } catch (e) {
+        if (e.name === 'QuotaExceededError' || e.code === 22) {
+          diagnostics.isPrivateMode = true;
+        }
+      }
+      
+      return diagnostics;
+    }
+
+    function showStorageDiagnostics() {
+      const diag = checkStorageStatus();
+      let message = '=== Storage Diagnostics ===\n\n';
+      
+      if (diag.isFileProtocol) {
+        message += '⚠️ WARNING: Opening from file:// protocol\n';
+        message += 'Some browsers restrict localStorage for local files.\n';
+        message += 'Consider using a local web server instead.\n\n';
+        message += 'Easy options:\n';
+        message += '1. Python: python -m http.server 8000\n';
+        message += '2. Node.js: npx serve\n';
+        message += '3. VS Code: Live Server extension\n\n';
+      }
+      
+      if (diag.isPrivateMode) {
+        message += '⚠️ WARNING: Private/Incognito mode detected\n';
+        message += 'Data will be cleared when browser closes.\n\n';
+      }
+      
+      message += `Storage Available: ${diag.storageAvailable ? '✅ Yes' : '❌ No'}\n`;
+      message += `Read/Write Test: ${diag.testWriteRead ? '✅ Passed' : '❌ Failed'}\n`;
+      message += `Protocol: ${window.location.protocol}\n`;
+      message += `Origin: ${window.location.origin}\n`;
+      
+      // Show current data stats
+      const users = localStorage.getItem('mathPracticeUsers');
+      const data = localStorage.getItem('mathPracticeAllData');
+      const sheets = localStorage.getItem('mathPracticeSavedWorksheets');
+      
+      message += '\n=== Current Stored Data ===\n';
+      message += `Users: ${users ? JSON.parse(users).length + ' users' : 'None'}\n`;
+      message += `User Data: ${data ? (data.length / 1024).toFixed(1) + ' KB' : 'None'}\n`;
+      message += `Worksheets: ${sheets ? (sheets.length / 1024).toFixed(1) + ' KB' : 'None'}\n`;
+      
+      alert(message);
+    }
+
+    // =============================================================================
     // LOCAL STORAGE
     // =============================================================================
     function loadFromStorage() {
@@ -236,16 +309,30 @@
       if (savedData) {
         try {
           const parsed = JSON.parse(savedData);
-          const decompressed = decompressFromStorage(parsed);
-          state.allUserData = decompressed.allUserData || decompressed;
+          // Check if it has the v2 structure
+          if (parsed.v === 2) {
+            // Load question definitions first (needed for decompression)
+            questionDefs = parsed.qd || {};
+            state.allUserData = decompressAllUserData(parsed.ud || {});
+          } else {
+            // Legacy format or already decompressed - use as-is
+            state.allUserData = parsed;
+          }
         } catch (e) { console.warn('Could not parse user data', e); }
       }
 
       if (savedSheets) {
         try {
           const parsed = JSON.parse(savedSheets);
-          const decompressed = decompressFromStorage(parsed);
-          state.savedWorksheets = decompressed.savedWorksheets || decompressed;
+          // Check if it has the v2 structure
+          if (parsed.v === 2) {
+            // Load question definitions (may override from user data, but that's ok)
+            questionDefs = parsed.qd || {};
+            state.savedWorksheets = decompressAllWorksheets(parsed.sw || {});
+          } else {
+            // Legacy format
+            state.savedWorksheets = parsed;
+          }
         } catch (e) { console.warn('Could not parse worksheets', e); }
       }
 
@@ -269,7 +356,12 @@
         allUserData: state.allUserData,
         savedWorksheets: state.savedWorksheets
       });
-      localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+      // Save with version marker and question definitions so it can be decompressed properly
+      localStorage.setItem('mathPracticeAllData', JSON.stringify({
+        v: 2,
+        ud: compressed.ud,
+        qd: compressed.qd
+      }));
     }
 
     function saveWorksheets(worksheets) {
@@ -868,7 +960,12 @@
             
             const compressed = compressForStorage(importData);
             localStorage.setItem('mathPracticeUsers', JSON.stringify(importData.users));
-            localStorage.setItem('mathPracticeAllData', JSON.stringify(compressed.ud));
+            // Save with v2 structure including question definitions
+            localStorage.setItem('mathPracticeAllData', JSON.stringify({
+              v: 2,
+              ud: compressed.ud,
+              qd: compressed.qd
+            }));
             localStorage.setItem('mathPracticeSavedWorksheets', JSON.stringify({
               v: 2,
               sw: compressed.sw,
@@ -1076,6 +1173,19 @@
                   onchange="handleImport(event)"
                   class="w-full text-sm"
                 />
+              </div>
+              
+              <div class="border-t pt-4">
+                <h3 class="font-semibold mb-2">Storage Diagnostics</h3>
+                <p class="text-sm text-gray-600 mb-3">
+                  Check if your browser is saving data properly
+                </p>
+                <button
+                  onclick="showStorageDiagnostics()"
+                  class="w-full bg-gray-500 text-white px-4 py-2 rounded font-semibold hover:bg-gray-600"
+                >
+                  🔍 Check Storage Status
+                </button>
               </div>
             </div>
             
